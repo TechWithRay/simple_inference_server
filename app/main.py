@@ -7,11 +7,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import huggingface_hub as hf
-from huggingface_hub import snapshot_download
 import torch
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from huggingface_hub import snapshot_download
 
 from app import state
 from app.api import router as api_router
@@ -182,7 +182,7 @@ def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, c
     if os.getenv("AUTO_DOWNLOAD_MODELS", "1") == "0":
         logger.info("Auto download disabled; assuming models are pre-fetched")
         return
-    if snapshot_download is None:  # type: ignore[truthy-bool]
+    if not hasattr(hf, "snapshot_download"):
         raise SystemExit("huggingface_hub is required for auto download")
 
     try:

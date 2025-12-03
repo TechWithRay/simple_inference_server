@@ -107,7 +107,7 @@ class ChatBatcher:
                         break
                     try:
                         candidates.append(await asyncio.wait_for(self.queue.get(), timeout=remaining))
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         break
 
                 # Partition by config_key; process the largest-compatible bucket; push back the rest.
