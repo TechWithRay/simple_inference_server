@@ -64,8 +64,8 @@ class ChatBatcher:
     ) -> Any:
         if self._stopping:
             raise RuntimeError("Chat batcher is stopping")
-        if max_new_tokens > self.max_new_tokens_ceiling:
-            raise ValueError(f"max_tokens exceeds ceiling {self.max_new_tokens_ceiling}")
+        # Clamp overly large requests instead of failing so the API can fall back gracefully.
+        max_new_tokens = min(max_new_tokens, self.max_new_tokens_ceiling)
 
         loop = asyncio.get_running_loop()
 
@@ -103,11 +103,11 @@ class ChatBatcher:
                 # Pull up to max_batch items within the window, regardless of config.
                 while len(candidates) < self.max_batch:
                     remaining = self.window - (time.perf_counter() - start)
-                    if remaining <= 0 or self.queue.empty():
+                    if remaining <= 0:
                         break
                     try:
                         candidates.append(await asyncio.wait_for(self.queue.get(), timeout=remaining))
-                    except TimeoutError:
+                    except asyncio.TimeoutError:
                         break
 
                 # Partition by config_key; process the largest-compatible bucket; push back the rest.
@@ -209,7 +209,6 @@ class ChatBatcher:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         self._task = None
-        _COUNT_EXECUTOR.shutdown(wait=False)
 
 
 class ChatBatchingService:
