@@ -16,7 +16,7 @@ from huggingface_hub import snapshot_download
 from app import state
 from app.api import router as api_router
 from app.batching import BatchingService
-from app.chat_batching import ChatBatchingService
+from app.chat_batching import ChatBatchingService, shutdown_count_executor
 from app.concurrency import limiter
 from app.concurrency.limiter import stop_accepting, wait_for_drain
 from app.logging_config import setup_logging
@@ -230,6 +230,7 @@ async def shutdown(
     if chat_batching_service is not None:
         await chat_batching_service.stop()
         state.chat_batching_service = None
+    shutdown_count_executor()
     shutdown_executors()
 
 

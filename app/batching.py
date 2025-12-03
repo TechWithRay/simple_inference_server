@@ -84,6 +84,10 @@ class ModelBatcher:
 
     async def stop(self) -> None:
         if self._task is not None:
+            while not self.queue.empty():
+                pending = self.queue.get_nowait()
+                if not pending.future.done():
+                    pending.future.set_exception(asyncio.CancelledError())
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task

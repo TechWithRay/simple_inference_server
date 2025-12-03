@@ -20,7 +20,9 @@ from app.monitoring.metrics import (
 from app.threadpool import get_chat_executor
 
 logger = logging.getLogger(__name__)
-_COUNT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat-count")
+_COUNT_EXECUTOR: ThreadPoolExecutor | None = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="chat-count"
+)
 
 
 @dataclass
@@ -70,6 +72,8 @@ class ChatBatcher:
         loop = asyncio.get_running_loop()
 
         # Enforce prompt length; use a lightweight dedicated executor to avoid starving the main pool.
+        if _COUNT_EXECUTOR is None:  # pragma: no cover - defensive guard during shutdown
+            raise RuntimeError("Chat count executor is not available")
         prompt_tokens = await loop.run_in_executor(_COUNT_EXECUTOR, self.model.count_tokens, messages)
         if prompt_tokens > self.max_prompt_tokens:
             raise ValueError(f"Prompt too long; max {self.max_prompt_tokens} tokens")
@@ -205,10 +209,21 @@ class ChatBatcher:
     async def stop(self) -> None:
         self._stopping = True
         if self._task is not None:
+            while not self.queue.empty():
+                pending = self.queue.get_nowait()
+                if not pending.future.done():
+                    pending.future.set_exception(asyncio.CancelledError())
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         self._task = None
+
+
+def shutdown_count_executor() -> None:
+    global _COUNT_EXECUTOR
+    executor, _COUNT_EXECUTOR = _COUNT_EXECUTOR, None
+    if executor is not None:
+        executor.shutdown(wait=True)
 
 
 class ChatBatchingService:
