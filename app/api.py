@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import threading
@@ -360,6 +361,7 @@ class HealthResponse(BaseModel):
     warmup: WarmupDetails | None = None
     chat_batch_queues: list[QueueDepth] | None = None
     embedding_batch_queues: list[QueueDepth] | None = None
+    runtime_config: dict[str, Any] | None = None
 
 
 @router.post("/v1/embeddings", response_model=EmbeddingResponse)
@@ -391,6 +393,9 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
             )
 
     start = time.perf_counter()
+    embed_timeout = float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60"))
+    cancel_event = threading.Event()
+    disconnect_task: asyncio.Task[None] | None = None
     label_token = set_queue_label(req.model or "embedding")
     try:
         async with limiter():
@@ -405,12 +410,36 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
 
             try:
                 batcher = getattr(request.app.state, "batching_service", None)
+                loop = asyncio.get_running_loop()
+                disconnect_task = asyncio.create_task(_cancel_on_disconnect(request, cancel_event))
+
                 if batcher is not None and getattr(batcher, "enabled", False):
-                    vectors = await batcher.enqueue(req.model, texts)
+                    work_task: asyncio.Future[Any] = asyncio.ensure_future(batcher.enqueue(req.model, texts))
                 else:
-                    loop = asyncio.get_running_loop()
                     executor = get_embedding_executor()
-                    vectors = await loop.run_in_executor(executor, model.embed, texts)
+                    work_task = asyncio.ensure_future(loop.run_in_executor(executor, model.embed, texts))
+
+                if disconnect_task is None:
+                    disconnect_task = asyncio.create_task(_cancel_on_disconnect(request, cancel_event))
+                done, _pending = await asyncio.wait(
+                    {work_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=embed_timeout,
+                )
+                if work_task in done:
+                    vectors = work_task.result()
+                else:
+                    work_task.cancel()
+                    raise HTTPException(
+                        status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+                        detail="Client disconnected",
+                    )
+            except TimeoutError as exc:
+                record_request(req.model, "504")
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Embedding generation timed out",
+                ) from exc
             except (EmbeddingBatchQueueFullError, EmbeddingBatchQueueTimeoutError) as exc:
                 record_request(req.model, "429")
                 raise HTTPException(
@@ -454,6 +483,8 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
         ) from exc
     finally:
         reset_queue_label(label_token)
+        if disconnect_task is not None:
+            disconnect_task.cancel()
 
     latency = time.perf_counter() - start
     observe_latency(req.model, latency)
@@ -557,6 +588,8 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
             cancel_event = threading.Event()
             disconnect_task = asyncio.create_task(_cancel_on_disconnect(_request, cancel_event))
             gen_timeout = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
+            generate_accepts_cancel = "cancel_event" in inspect.signature(model.generate).parameters
+            generate_prepared_accepts_cancel = hasattr(model, "generate_prepared") and "cancel_event" in inspect.signature(model.generate_prepared).parameters
             batcher = getattr(_request.app.state, "chat_batching_service", None)
             if (
                 batcher is not None
@@ -611,27 +644,37 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
             if generation is None:
                 async def _run_generation() -> ChatGeneration:
                     if prepared_inputs is not None and hasattr(model, "generate_prepared"):
+                        kwargs = {
+                            "max_new_tokens": max_tokens,
+                            "temperature": temperature,
+                            "top_p": top_p,
+                            "stop": stop,
+                        }
+                        if generate_prepared_accepts_cancel:
+                            kwargs["cancel_event"] = cancel_event
+
                         return await loop.run_in_executor(
                             executor,
                             lambda: model.generate_prepared(
                                 prepared_inputs,
-                                max_new_tokens=max_tokens,
-                                temperature=temperature,
-                                top_p=top_p,
-                                stop=stop,
-                                cancel_event=cancel_event,
+                                **kwargs,
                             ),
                         )
+
+                    kwargs = {
+                        "max_new_tokens": max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                        "stop": stop,
+                    }
+                    if generate_accepts_cancel:
+                        kwargs["cancel_event"] = cancel_event
 
                     return await loop.run_in_executor(
                         executor,
                         lambda: model.generate(
                             raw_messages,
-                            max_new_tokens=max_tokens,
-                            temperature=temperature,
-                            top_p=top_p,
-                            stop=stop,
-                            cancel_event=cancel_event,
+                            **kwargs,
                         ),
                     )
 
@@ -737,6 +780,7 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
     file: UploadFile,
     model_name: str,
     registry: ModelRegistry,
+    request: Request,
     task: Literal["transcribe", "translate"],
     language: str | None,
     prompt: str | None,
@@ -759,6 +803,9 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
     temp_path: str | None = None
     size_bytes = 0
     duration: float | None = None
+    audio_timeout = float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180"))
+    cancel_event = threading.Event()
+    disconnect_task: asyncio.Task[None] | None = asyncio.create_task(_cancel_on_disconnect(request, cancel_event))
     label_token = set_audio_queue_label(model_name or "audio")
 
     try:
@@ -783,17 +830,40 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
                 )
 
             try:
-                result = await loop.run_in_executor(
-                    executor,
-                    lambda: model.transcribe(
-                        temp_path,
-                        language=language,
-                        prompt=prompt,
-                        temperature=effective_temperature,
-                        task=task,
-                        timestamp_granularity=granularity if need_segments else None,
-                    ),
+                work_task: asyncio.Future[Any] = asyncio.ensure_future(
+                    loop.run_in_executor(
+                        executor,
+                        lambda: model.transcribe(
+                            temp_path,
+                            language=language,
+                            prompt=prompt,
+                            temperature=effective_temperature,
+                            task=task,
+                            timestamp_granularity=granularity if need_segments else None,
+                        ),
+                    )
                 )
+                if disconnect_task is None:
+                    disconnect_task = asyncio.create_task(_cancel_on_disconnect(request, cancel_event))
+                done, _pending = await asyncio.wait(
+                    {work_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=audio_timeout,
+                )
+                if work_task in done:
+                    result = work_task.result()
+                else:
+                    work_task.cancel()
+                    raise HTTPException(
+                        status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+                        detail="Client disconnected",
+                    )
+            except TimeoutError as exc:
+                record_audio_request(model_name, "504")
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Audio processing timed out",
+                ) from exc
             except Exception as exc:  # pragma: no cover - runtime failure
                 record_audio_request(model_name, "500")
                 logger.exception(
@@ -829,6 +899,8 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
         if temp_path:
             with contextlib.suppress(Exception):
                 Path(temp_path).unlink(missing_ok=True)
+        if disconnect_task is not None:
+            disconnect_task.cancel()
 
     latency = time.perf_counter() - start
     observe_audio_latency(model_name, latency)
@@ -890,6 +962,7 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
 @router.post("/v1/audio/transcriptions")
 async def create_transcription(  # noqa: PLR0913
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+    request: Request,
     file: UploadFile = File(...),  # noqa: B008
     model: str = Form(...),  # noqa: B008
     language: str | None = Form(default=None),  # noqa: B008
@@ -902,6 +975,7 @@ async def create_transcription(  # noqa: PLR0913
         file=file,
         model_name=model,
         registry=registry,
+        request=request,
         task="transcribe",
         language=language,
         prompt=prompt,
@@ -914,6 +988,7 @@ async def create_transcription(  # noqa: PLR0913
 @router.post("/v1/audio/translations")
 async def create_translation(  # noqa: PLR0913
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+    request: Request,
     file: UploadFile = File(...),  # noqa: B008
     model: str = Form(...),  # noqa: B008
     prompt: str | None = Form(default=None),  # noqa: B008
@@ -925,6 +1000,7 @@ async def create_translation(  # noqa: PLR0913
         file=file,
         model_name=model,
         registry=registry,
+        request=request,
         task="translate",
         language="en",  # OpenAI translate outputs English
         prompt=prompt,
@@ -984,6 +1060,8 @@ async def health(
             for name, (size, max_size) in embed_batcher.queue_stats().items()
         ]
 
+    runtime_cfg: dict[str, Any] | None = getattr(request.app.state, "runtime_config", None)
+
     health_status = "ok"
     http_status = status.HTTP_200_OK
     if warmup_status.required and (not warmup_status.completed or warmup_failures):
@@ -997,6 +1075,7 @@ async def health(
         warmup=warmup_details,
         chat_batch_queues=chat_queue_depths,
         embedding_batch_queues=embed_queue_depths,
+        runtime_config=runtime_cfg,
     )
 
     if http_status != status.HTTP_200_OK:

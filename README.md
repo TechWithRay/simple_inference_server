@@ -121,12 +121,13 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - `WARMUP_FAIL_FAST` (alias `REQUIRE_WARMUP_SUCCESS`, default `1`): when warmup is enabled, abort startup if any model warmup fails instead of serving partially warmed models.
 - Chat generation defaults: per-model `defaults` (temperature/top_p/max_tokens) in the config; request args override.
 - Embedding batching queue: `EMBEDDING_BATCH_QUEUE_SIZE` (default `64`, falls back to `BATCH_QUEUE_SIZE` / `MAX_QUEUE_SIZE`) bounds the per-model micro-batch queue to prevent unbounded RAM growth.
-- Audio path isolation: `AUDIO_MAX_CONCURRENT` / `AUDIO_MAX_QUEUE_SIZE` / `AUDIO_QUEUE_TIMEOUT_SEC` plus `AUDIO_MAX_WORKERS` size a dedicated limiter + thread pool for Whisper so it will not block chat/embedding traffic; default worker count is **1** for thread-safety, override if you build per-worker pipelines.
-  - Handlers must be thread-safe if `AUDIO_MAX_WORKERS` > 1; otherwise wrap shared state with locks (Whisper handler already guards its pipeline).
+- Audio path isolation: `AUDIO_MAX_CONCURRENT` / `AUDIO_MAX_QUEUE_SIZE` / `AUDIO_QUEUE_TIMEOUT_SEC` plus `AUDIO_MAX_WORKERS` size a dedicated limiter + thread pool for Whisper so it will not block chat/embedding traffic; default worker count is **1** and Whisper currently serializes work with a lock, so bumping workers only helps if you fork per-worker pipelines.
+  - Handlers must be thread-safe if `AUDIO_MAX_WORKERS` > 1; otherwise wrap shared state with locks (Whisper handler already guards its pipeline but still serializes by default).
+- Request timeouts: `EMBEDDING_GENERATE_TIMEOUT_SEC` (default `60`) and `AUDIO_PROCESS_TIMEOUT_SEC` (default `180`) bound executor work to keep queues from clogging under hung models.
 - Chat batching (text-only): `ENABLE_CHAT_BATCHING` (default `1`), `CHAT_BATCH_WINDOW_MS` (default `10` ms), `CHAT_BATCH_MAX_SIZE` (default `8`), `CHAT_BATCH_QUEUE_SIZE` (default `64`), `CHAT_MAX_PROMPT_TOKENS` (default `4096`), `CHAT_MAX_NEW_TOKENS` (default `2048`), `CHAT_BATCH_ALLOW_VISION` (default `0` keeps vision models on legacy path).
 - Chat scheduler tuning: `CHAT_COUNT_MAX_WORKERS` (token-count threads, default `2`), `CHAT_REQUEUE_RETRIES` (default `3`) and `CHAT_REQUEUE_BASE_DELAY_MS` (default `5`) control requeue backoff to降低峰值 429。
 - Chat cancellation: client disconnects or server-side timeouts raise a cancel signal to the model (stopping criteria). This is **best-effort**—already-running kernels keep executing; use a process-isolated backend if you need hard preemption.
-- Vision fetch safety (Qwen3-VL): `ALLOW_REMOTE_IMAGES=0` (default), `REMOTE_IMAGE_TIMEOUT=5`, `MAX_REMOTE_IMAGE_BYTES=5242880`. Remote HTTP fetch stays **disabled by default** to avoid SSRF/large downloads; enable only with trusted sources.
+- Vision fetch safety (Qwen3-VL): `ALLOW_REMOTE_IMAGES=0` (default), `REMOTE_IMAGE_TIMEOUT=5`, `MAX_REMOTE_IMAGE_BYTES=5242880`. Remote HTTP fetch stays **disabled by default** to avoid SSRF/large downloads; enable only with trusted sources **and** set `REMOTE_IMAGE_HOST_ALLOWLIST` (comma-separated domains) or the request will be rejected.
   - TODO: add bandwidth/throughput metrics for remote image fetch when enabled.
 - FP8 models need `accelerate`; non-FP8 variants avoid this dependency.
 

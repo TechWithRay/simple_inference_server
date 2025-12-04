@@ -35,7 +35,7 @@ from app.warmup import warm_up_models
 logger = logging.getLogger(__name__)
 
 
-def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
+def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # noqa: PLR0915
     setup_logging()
 
     # Prefer local ./models; if HF_HOME already set, keep it for fallback use
@@ -123,6 +123,8 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
         "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
         "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
         "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
+        "embedding_generate_timeout_sec": float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60")),
+        "audio_process_timeout_sec": float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180")),
     }
     logger.info(
         "Loaded models",
@@ -158,6 +160,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
         capabilities=warmup.get_capability_status(),
     )
     state.warmup_status = warmup_status
+    state.runtime_config = runtime_cfg
 
     return registry, batching_service, chat_batching_service
 
@@ -311,6 +314,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.batching_service = batching_service
         app.state.chat_batching_service = chat_batching_service
         app.state.warmup_status = state.warmup_status
+        app.state.runtime_config = state.runtime_config
         setup_metrics(app)
         yield
     finally:

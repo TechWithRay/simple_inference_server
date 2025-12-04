@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.batching import BatchingService
 from app.chat_batching import ChatBatchingService
@@ -20,3 +21,5 @@ model_registry: ModelRegistry | None = None
 batching_service: BatchingService | None = None
 chat_batching_service: ChatBatchingService | None = None
 warmup_status: WarmupStatus = WarmupStatus()
+# Optional runtime config snapshot for health/status endpoints.
+runtime_config: dict[str, Any] | None = None

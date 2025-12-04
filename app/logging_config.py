@@ -35,14 +35,11 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    if logging.getLogger().handlers:
-        return  # Already configured
-
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
-
-    logging.basicConfig(level=log_level, handlers=[handler])
+    # Force our JSON handler even if uvicorn already configured handlers.
+    logging.basicConfig(level=log_level, handlers=[handler], force=True)
     logging.getLogger("uvicorn").setLevel(log_level)
     logging.getLogger("uvicorn.error").setLevel(log_level)
     logging.getLogger("uvicorn.access").setLevel(log_level)

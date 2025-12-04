@@ -31,6 +31,7 @@ _REQUEUE_BASE_DELAY_SEC = max(0.001, float(os.getenv("CHAT_REQUEUE_BASE_DELAY_MS
 _REQUEUE_MAX_DELAY_SEC = float(os.getenv("CHAT_REQUEUE_MAX_DELAY_MS", "100")) / 1000.0
 _REQUEUE_MAX_WAIT_SEC = float(os.getenv("CHAT_REQUEUE_MAX_WAIT_MS", "500")) / 1000.0
 _QUEUE_MAX_WAIT_SEC = float(os.getenv("CHAT_QUEUE_MAX_WAIT_MS", "1000")) / 1000.0
+_REQUEUE_MAX_TASKS = int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64"))
 _PREPARE_TIMEOUT_SEC = float(os.getenv("CHAT_PREPARE_TIMEOUT_SEC", "10"))
 _GENERATE_TIMEOUT_SEC = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
 
@@ -318,7 +319,7 @@ class ChatBatcher:
         # Drop if deadline passed
         if item.deadline is not None and asyncio.get_running_loop().time() >= item.deadline:
             if not item.future.done():
-                item.future.set_exception(asyncio.QueueFull("Chat batch queue deadline exceeded"))
+                item.future.set_exception(ChatBatchQueueTimeoutError("Chat batch queue deadline exceeded"))
             record_chat_batch_queue_rejection(self.model_name)
             return
 
@@ -327,6 +328,13 @@ class ChatBatcher:
             return
         except asyncio.QueueFull:
             pass
+
+        # Avoid unbounded background retries under sustained pressure
+        if len(self._requeue_tasks) >= _REQUEUE_MAX_TASKS:
+            if not item.future.done():
+                item.future.set_exception(ChatBatchQueueTimeoutError("Chat batch requeue backlog exceeded"))
+            record_chat_batch_queue_rejection(self.model_name)
+            return
 
         async def _retry() -> None:
             delay = _REQUEUE_BASE_DELAY_SEC
@@ -341,7 +349,9 @@ class ChatBatcher:
                 self.queue.put_nowait(item)
             except asyncio.QueueFull:
                 if not item.future.done():
-                    item.future.set_exception(asyncio.QueueFull("Chat batch queue full"))
+                    item.future.set_exception(ChatBatchQueueTimeoutError("Chat batch queue full"))
+                record_chat_batch_queue_rejection(self.model_name)
+                return
 
         task = asyncio.create_task(_retry())
         self._requeue_tasks.add(task)
