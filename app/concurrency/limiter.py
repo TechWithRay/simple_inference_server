@@ -45,6 +45,12 @@ async def _get_in_flight() -> int:
 
 @asynccontextmanager
 async def limiter() -> AsyncIterator[None]:
+    """Global concurrency guard for non-audio work.
+
+    Couples a bounded queue with a semaphore so that requests either acquire
+    capacity within QUEUE_TIMEOUT_SEC or fail fast with well-defined errors,
+    preventing unbounded memory growth under load.
+    """
     if not _state["accepting"]:
         raise ShuttingDownError("Service is shutting down")
     queued = False

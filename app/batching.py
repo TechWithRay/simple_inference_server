@@ -131,26 +131,15 @@ class ModelBatcher:
 
 
 def _merge_cancel_events(events: list[threading.Event]) -> threading.Event | None:
-    """Create a combined event that triggers when any input event is set."""
+    """Return a representative cancel event for the batch.
 
+    Embedding cancellation is best-effort and primarily driven by client
+    disconnects. To avoid spawning background threads per batch, we simply
+    reuse the first non-null event when multiple are present.
+    """
     if not events:
         return None
-    if len(events) == 1:
-        return events[0]
-
-    combined = threading.Event()
-
-    def _watch() -> None:
-        while not combined.is_set():
-            for ev in events:
-                if ev.is_set():
-                    combined.set()
-                    return
-            time.sleep(0.01)
-
-    watcher = threading.Thread(target=_watch, name="embed-cancel-merge", daemon=True)
-    watcher.start()
-    return combined
+    return events[0]
 
 
 class BatchingService:

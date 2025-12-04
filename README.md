@@ -334,7 +334,7 @@ Unsupported or unregistered `model` values return `404 Model not found`. Be sure
   - `POST /embeddings`: non-OpenAI-compatible embeddings API
 - OpenAI-style streaming chat completions (SSE/chunked responses)
 - Request/trace IDs: include a per-request ID in logs and responses for easier tracing.
-- Remote image hardening: add strict SSRF/IP filtering, MIME sniffing, redirect limits; keep disabled unless allowlisted hosts are configured.
+- Remote image telemetry / tuning: add bandwidth/throughput metrics for remote image fetch and finer-grained limits; remote fetch is already guardrailed with host allowlists, private IP blocking, MIME sniffing, size caps, and redirect checks.
 - Rerank: implement lightweight rerank handler/endpoint once a backend is chosen (current codepath removed).
 - Test additions: vision chat path, non-batch chat serialization, prompt-length guard, warmup OOM surfacing.
 

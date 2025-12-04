@@ -416,6 +416,9 @@ def _warmup_with_executor(
                 log_extra.update(step_extra)
             logger.info("warmup_step_ok", extra=log_extra)
         except torch.cuda.OutOfMemoryError:  # pragma: no cover - defensive
+            # Warmup failures are treated as a startup guardrail; callers decide
+            # whether to fail-fast the process or surface partial readiness in
+            # health checks.
             logger.exception(
                 "warmup_oom",
                 extra={

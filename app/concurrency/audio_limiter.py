@@ -48,6 +48,11 @@ async def _get_in_flight() -> int:
 
 @asynccontextmanager
 async def limiter() -> AsyncIterator[None]:
+    """Dedicated concurrency guard for audio/Whisper work.
+
+    Mirrors the main limiter but uses AUDIO_* settings so that long-running
+    audio jobs cannot starve chat/embedding traffic.
+    """
     if not _state["accepting"]:
         raise AudioShuttingDownError("Service is shutting down")
     queued = False

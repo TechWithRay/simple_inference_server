@@ -270,7 +270,8 @@ class ChatBatcher:
                     cancel_events=cancel_events,
                 )
 
-            # Fallback: run sequentially (still reduces queue contention)
+            # Fallback: run sequentially (still reduces queue contention and keeps
+            # behaviour consistent with non-batched paths).
             return [
                 self._generate_single(bi, stop_list, max_new_tokens, temperature, top_p)
                 for bi in batch_items
