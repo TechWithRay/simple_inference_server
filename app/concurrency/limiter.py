@@ -29,9 +29,15 @@ _in_flight_state = {"count": 0}
 _in_flight_lock = asyncio.Lock()
 
 
-async def _decrement_in_flight() -> None:
+async def _change_in_flight(delta: int) -> None:
     async with _in_flight_lock:
-        _in_flight_state["count"] -= 1
+        new_count = _in_flight_state["count"] + delta
+        _in_flight_state["count"] = max(0, new_count)
+
+
+async def _get_in_flight() -> int:
+    async with _in_flight_lock:
+        return _in_flight_state["count"]
 
 
 @asynccontextmanager
@@ -55,13 +61,12 @@ async def limiter() -> AsyncIterator[None]:
             record_queue_rejection()
             raise QueueTimeoutError("Timed out waiting for worker") from exc
 
-        async with _in_flight_lock:
-            _in_flight_state["count"] += 1
+        await _change_in_flight(1)
         try:
             yield
         finally:
             try:
-                await asyncio.shield(_decrement_in_flight())
+                await asyncio.shield(_change_in_flight(-1))
             except asyncio.CancelledError:
                 # Propagate cancellation after ensuring the counter is updated.
                 raise
@@ -83,8 +88,7 @@ async def wait_for_drain(timeout: float = 5.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while True:
-        async with _in_flight_lock:
-            active = _in_flight_state["count"]
+        active = await _get_in_flight()
         queue_backlog = _queue.qsize()
         if active == 0 and queue_backlog == 0:
             break
