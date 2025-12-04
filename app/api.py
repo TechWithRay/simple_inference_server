@@ -63,7 +63,7 @@ from app.monitoring.metrics import (
     record_request,
 )
 from app.state import WarmupStatus, warmup_status as global_warmup_status
-from app.threadpool import get_audio_executor, get_chat_executor, get_embedding_executor
+from app.threadpool import get_audio_executor, get_chat_executor, get_embedding_count_executor, get_embedding_executor
 from app.utils.uploads import chunked_upload_to_tempfile
 
 router = APIRouter()
@@ -432,21 +432,32 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
 
                 if disconnect_task is None:
                     disconnect_task = asyncio.create_task(_cancel_on_disconnect(request, cancel_event))
+
                 done, _pending = await asyncio.wait(
                     {work_task, disconnect_task},
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=embed_timeout,
                 )
+                if not done:
+                    cancel_event.set()
+                    work_task.cancel()
+                    raise HTTPException(
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                        detail="Embedding generation timed out",
+                    )
+
                 if work_task in done:
                     try:
                         vectors = work_task.result()
                     except (asyncio.CancelledError, RuntimeError) as exc:
+                        cancel_event.set()
                         record_request(req.model, "499")
                         raise HTTPException(
                             status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
                             detail="Request cancelled",
                         ) from exc
                 else:
+                    cancel_event.set()
                     work_task.cancel()
                     raise HTTPException(
                         status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
@@ -523,7 +534,10 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
     ]
     try:
         loop = asyncio.get_running_loop()
-        prompt_tokens = await loop.run_in_executor(get_embedding_executor(), lambda: model.count_tokens(texts))
+        prompt_tokens = await loop.run_in_executor(
+            get_embedding_count_executor(),
+            lambda: model.count_tokens(texts),
+        )
     except Exception:
         prompt_tokens = 0
     usage = Usage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens, completion_tokens=None)
@@ -870,16 +884,26 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
                     return_when=asyncio.FIRST_COMPLETED,
                     timeout=audio_timeout,
                 )
+                if not done:
+                    cancel_event.set()
+                    work_task.cancel()
+                    raise HTTPException(
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                        detail="Audio processing timed out",
+                    )
+
                 if work_task in done:
                     try:
                         result = work_task.result()
                     except (asyncio.CancelledError, RuntimeError) as exc:
+                        cancel_event.set()
                         record_audio_request(model_name, "499")
                         raise HTTPException(
                             status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
                             detail="Request cancelled",
                         ) from exc
                 else:
+                    cancel_event.set()
                     work_task.cancel()
                     raise HTTPException(
                         status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,

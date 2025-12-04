@@ -95,10 +95,14 @@ class ModelBatcher:
             if not texts:
                 continue
 
+            # Merge cancel signals so a single event can be passed down to the model.
+            cancel_events = [bi.cancel_event for bi in batch_items if bi.cancel_event is not None]
+            cancel_event = _merge_cancel_events(cancel_events)
+
             try:
                 vectors = await loop.run_in_executor(
                     executor,
-                    functools.partial(self.model.embed, texts, cancel_event=None),
+                    functools.partial(self.model.embed, texts, cancel_event=cancel_event),
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 for bi in batch_items:
@@ -124,6 +128,29 @@ class ModelBatcher:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+
+
+def _merge_cancel_events(events: list[threading.Event]) -> threading.Event | None:
+    """Create a combined event that triggers when any input event is set."""
+
+    if not events:
+        return None
+    if len(events) == 1:
+        return events[0]
+
+    combined = threading.Event()
+
+    def _watch() -> None:
+        while not combined.is_set():
+            for ev in events:
+                if ev.is_set():
+                    combined.set()
+                    return
+            time.sleep(0.01)
+
+    watcher = threading.Thread(target=_watch, name="embed-cancel-merge", daemon=True)
+    watcher.start()
+    return combined
 
 
 class BatchingService:

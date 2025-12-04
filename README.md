@@ -221,7 +221,7 @@ Warmup controls:
 - `WARMUP_INFERENCE_MODE` (default `1`): use `torch.inference_mode()` / `no_grad` during warmup.
 - `WARMUP_VRAM_BUDGET_MB` / `WARMUP_VRAM_PER_WORKER_MB`: limit concurrent warmup workers based on memory headroom.
 - `WARMUP_ALLOWLIST` / `WARMUP_SKIPLIST`: include or skip specific models.
-- `REQUIRE_WARMUP_SUCCESS` (default `0`): fail startup if any model warmup fails.
+- `REQUIRE_WARMUP_SUCCESS` (default `1`): fail startup if any model warmup fails.
 
 Request batching: by default the server can micro-batch concurrent embedding requests. Configure via `ENABLE_BATCHING` (default on), `BATCH_WINDOW_MS` (collection window, default `6` ms), and `BATCH_WINDOW_MAX_SIZE` (max combined batch). Set `BATCH_WINDOW_MS=0` to effectively disable coalescing.
 
