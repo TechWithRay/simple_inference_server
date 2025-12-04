@@ -80,7 +80,7 @@ def _should_sync(device: DeviceLike) -> bool:
     return torch.cuda.is_available() and isinstance(device, torch.device) and device.type == "cuda"
 
 
-def warm_up_models(registry: ModelRegistry) -> None:
+def warm_up_models(registry: ModelRegistry) -> list[str]:
     """Warm each model (and each worker thread) to smooth first-request latency.
 
     Runs one batch through every configured model on every executor worker to ensure
@@ -152,6 +152,8 @@ def warm_up_models(registry: ModelRegistry) -> None:
         logger.warning("warmup_failed_models", extra={"models": sorted(_failed_models)})
     else:
         logger.info("warmup_completed")
+
+    return get_failed_warmups()
 
 
 def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:

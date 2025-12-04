@@ -22,6 +22,7 @@ from app.concurrency.limiter import stop_accepting, wait_for_drain
 from app.logging_config import setup_logging
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import setup_metrics
+from app.state import WarmupStatus
 from app.threadpool import shutdown_executors
 from app.warmup import warm_up_models
 
@@ -123,8 +124,22 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
     )
     logger.info("runtime_config", extra=runtime_cfg)
 
-    if os.getenv("ENABLE_WARMUP", "1") != "0":
-        warm_up_models(registry)
+    warmup_required = os.getenv("ENABLE_WARMUP", "1") != "0"
+    require_warmup_success = os.getenv("REQUIRE_WARMUP_SUCCESS", "0") != "0"
+    warmup_failures: list[str] = []
+    warmup_completed = not warmup_required
+    if warmup_required:
+        warmup_failures = warm_up_models(registry)
+        warmup_completed = True
+        if require_warmup_success and warmup_failures:
+            raise SystemExit(
+                "Warmup failures detected and REQUIRE_WARMUP_SUCCESS is enabled."
+            )
+
+    warmup_status = WarmupStatus(
+        required=warmup_required, completed=warmup_completed, failures=warmup_failures
+    )
+    state.warmup_status = warmup_status
 
     return registry, batching_service, chat_batching_service
 
@@ -230,6 +245,7 @@ async def shutdown(
     if chat_batching_service is not None:
         await chat_batching_service.stop()
         state.chat_batching_service = None
+    state.warmup_status = WarmupStatus()
     shutdown_count_executor()
     shutdown_executors()
 
@@ -244,6 +260,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.model_registry = registry
         app.state.batching_service = batching_service
         app.state.chat_batching_service = chat_batching_service
+        app.state.warmup_status = state.warmup_status
         setup_metrics(app)
         yield
     finally:

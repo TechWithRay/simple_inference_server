@@ -41,9 +41,9 @@ from app.monitoring.metrics import (
     record_chat_request,
     record_request,
 )
+from app.state import WarmupStatus, warmup_status as global_warmup_status
 from app.threadpool import get_chat_executor, get_embedding_executor
 from app.utils.uploads import chunked_upload_to_tempfile
-from app.warmup import get_failed_warmups
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -199,6 +199,18 @@ def _probe_duration(path: str) -> float | None:
     return None
 
 
+def _resolve_warmup_status(request: Request | None) -> WarmupStatus:
+    if request is not None:
+        status_obj = getattr(request.app.state, "warmup_status", None)
+        if isinstance(status_obj, WarmupStatus):
+            return status_obj
+
+    if isinstance(global_warmup_status, WarmupStatus):
+        return global_warmup_status
+
+    return WarmupStatus()
+
+
 def _select_granularity(values: list[str] | None) -> Literal["word", "segment", None]:
     if not values:
         return None
@@ -254,10 +266,17 @@ class ModelsResponse(BaseModel):
     data: list[ModelInfo]
 
 
+class WarmupDetails(BaseModel):
+    required: bool
+    completed: bool
+    failures: list[str] | None = None
+
+
 class HealthResponse(BaseModel):
     status: str
     models: list[str] | None = None
     warmup_failures: list[str] | None = None
+    warmup: WarmupDetails | None = None
 
 
 @router.post("/v1/embeddings", response_model=EmbeddingResponse)
@@ -768,13 +787,38 @@ async def list_models(
 
 @router.get("/health", response_model=HealthResponse)
 async def health(
+    request: Request,
     registry: Annotated[ModelRegistry | None, Depends(get_model_registry, use_cache=False)] = None,
-) -> HealthResponse:
+) -> HealthResponse | JSONResponse:
     if registry is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Model registry not initialized")
     try:
         models = registry.list_models()
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Registry unavailable") from exc
-    failures = get_failed_warmups()
-    return HealthResponse(status="ok", models=models, warmup_failures=failures or None)
+
+    warmup_status = _resolve_warmup_status(request)
+    warmup_failures = list(warmup_status.failures)
+    warmup_details = WarmupDetails(
+        required=warmup_status.required,
+        completed=warmup_status.completed,
+        failures=warmup_failures or None,
+    )
+
+    health_status = "ok"
+    http_status = status.HTTP_200_OK
+    if warmup_status.required and (not warmup_status.completed or warmup_failures):
+        health_status = "unhealthy"
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    response = HealthResponse(
+        status=health_status,
+        models=models,
+        warmup_failures=warmup_failures or None,
+        warmup=warmup_details,
+    )
+
+    if http_status != status.HTTP_200_OK:
+        return JSONResponse(status_code=http_status, content=response.model_dump())
+
+    return response
