@@ -40,7 +40,8 @@ dev = [
   "anyio>=4.12.0",
   "ruff>=0.14.7",
   "mypy>=1.19.0",
-  "types-PyYAML>=6.0.12.20241230"
+  "types-PyYAML>=6.0.12.20241230",
+  "prometheus-client>=0.23.1",
 ]
 
 [tool.uv.sources]
