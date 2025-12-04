@@ -5,11 +5,11 @@ import io
 import logging
 import os
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Callable, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 import torch
 from PIL import Image
@@ -20,6 +20,8 @@ from app.models.registry import ModelRegistry
 from app.threadpool import get_embedding_executor
 
 logger = logging.getLogger(__name__)
+
+DeviceLike = torch.device | str | int | None
 
 _failed_models: set[str] = set()
 
@@ -35,7 +37,45 @@ class WarmupConfig:
     executor: ThreadPoolExecutor
 
 
-def _should_sync(device: object) -> bool:
+@runtime_checkable
+class Generates(Protocol):
+    name: str
+    device: DeviceLike
+    capabilities: list[str]
+
+    def generate(
+        self,
+        messages: Sequence[dict[str, Any]],
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop: list[str] | None = None,
+    ) -> Any:
+        ...
+
+
+@runtime_checkable
+class RerankModel(Protocol):
+    name: str
+    device: DeviceLike
+    capabilities: list[str]
+
+    def rerank(self, *, query: str, documents: list[str]) -> Any:
+        ...
+
+
+@runtime_checkable
+class Embeds(Protocol):
+    name: str
+    device: DeviceLike
+    capabilities: list[str]
+
+    def embed(self, texts: list[str]) -> Any:
+        ...
+
+
+def _should_sync(device: DeviceLike) -> bool:
     return torch.cuda.is_available() and isinstance(device, torch.device) and device.type == "cuda"
 
 
@@ -79,7 +119,7 @@ def warm_up_models(registry: ModelRegistry) -> None:
 
         model = registry.get(name)
         capabilities = getattr(model, "capabilities", [])
-        device = getattr(model, "device", None)
+        device = cast(DeviceLike, getattr(model, "device", None))
         plan = {
             "model": name,
             "steps": steps,
@@ -96,7 +136,7 @@ def warm_up_models(registry: ModelRegistry) -> None:
                 logger.debug("warmup_noop", extra={"model": name, "capability": capability})
                 continue
 
-            ok = warmer(model=model, device=device, config=config)
+            ok = warmer(model, device, config)
             capability_results[capability] = ok
             log_extra = {"model": name, "capability": capability}
             if ok:
@@ -113,7 +153,12 @@ def warm_up_models(registry: ModelRegistry) -> None:
         logger.info("warmup_completed")
 
 
-def _warmup_embedding_model(model: EmbeddingModel, device: object | None, config: WarmupConfig) -> bool:
+def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
+    if not isinstance(model, Embeds):
+        logger.warning("warmup_no_embed", extra={"model": getattr(model, "name", "unknown")})
+        return False
+
+    typed_model = cast(EmbeddingModel, model)
     workers = max(1, getattr(config.executor, "_max_workers", 1))
     allowed_workers = _select_worker_count(
         device=device,
@@ -131,7 +176,7 @@ def _warmup_embedding_model(model: EmbeddingModel, device: object | None, config
             start = time.perf_counter()
             try:
                 _run_warmup_step(
-                    model=model,
+                    model=typed_model,
                     texts=config.texts[: current_batch],
                     workers=current_workers,
                     use_inference_mode=config.use_inference_mode,
@@ -211,7 +256,7 @@ def _inference_context(enabled: bool) -> AbstractContextManager[None]:
 
 
 def _select_worker_count(
-    device: object | None,
+    device: DeviceLike,
     executor_workers: int,
     per_worker_vram_mb: float,
     vram_budget_mb: float,
@@ -229,7 +274,7 @@ def _select_worker_count(
     return max(1, min(base, allowed_by_budget))
 
 
-def _available_vram_mb(device: object | None) -> float:
+def _available_vram_mb(device: DeviceLike) -> float:
     if not _is_cuda_device(device):
         return 0.0
     try:
@@ -248,7 +293,7 @@ def _available_vram_mb(device: object | None) -> float:
         return 0.0
 
 
-def _is_cuda_device(device: object | None) -> bool:
+def _is_cuda_device(device: DeviceLike) -> bool:
     if not torch.cuda.is_available():
         return False
     if isinstance(device, torch.device):
@@ -256,7 +301,13 @@ def _is_cuda_device(device: object | None) -> bool:
     return isinstance(device, str) and device.startswith("cuda")
 
 
-def _warmup_chat_model(model: object, device: object | None, config: WarmupConfig) -> bool:
+def _warmup_chat_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
+    if not isinstance(model, Generates):
+        logger.warning(
+            "warmup_no_generator", extra={"model": getattr(model, "name", "unknown")}
+        )
+        return False
+
     messages = [
         {"role": "user", "content": "Hello!"},
     ]
@@ -291,7 +342,13 @@ def _warmup_chat_model(model: object, device: object | None, config: WarmupConfi
         return False
 
 
-def _warmup_vision_model(model: object, device: object | None, config: WarmupConfig) -> bool:
+def _warmup_vision_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
+    if not isinstance(model, Generates):
+        logger.warning(
+            "warmup_no_generator", extra={"model": getattr(model, "name", "unknown")}
+        )
+        return False
+
     image = Image.new("RGB", (2, 2), color=(255, 0, 0))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -337,15 +394,14 @@ def _warmup_vision_model(model: object, device: object | None, config: WarmupCon
         return False
 
 
-def _warmup_rerank_model(model: object, device: object | None, config: WarmupConfig) -> bool:
+def _warmup_rerank_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
     # Placeholder implementation for rerank-capable models.
     try:
-        rerank = getattr(model, "rerank", None)
-        if rerank is None:
+        if not isinstance(model, RerankModel):
             logger.warning("warmup_no_rerank", extra={"model": getattr(model, "name", "unknown")})
             return False
         with _inference_context(enabled=config.use_inference_mode):
-            rerank(query="warmup query", documents=["doc one", "doc two"])
+            model.rerank(query="warmup query", documents=["doc one", "doc two"])
         if _should_sync(device):
             torch.cuda.synchronize(device)
         return True
@@ -365,7 +421,10 @@ def _parse_list_env(var: str) -> set[str] | None:
     return values if values else None
 
 
-_CAPABILITY_WARMERS: dict[str, Callable[[object, object | None, WarmupConfig], bool]] = {
+WarmupFn = Callable[[object, DeviceLike, WarmupConfig], bool]
+
+
+_CAPABILITY_WARMERS: dict[str, WarmupFn] = {
     "text-embedding": _warmup_embedding_model,
     "chat-completion": _warmup_chat_model,
     "vision": _warmup_vision_model,
