@@ -17,7 +17,13 @@ from PIL import Image
 from app.concurrency.limiter import MAX_CONCURRENT
 from app.models.base import EmbeddingModel
 from app.models.registry import ModelRegistry
-from app.threadpool import get_embedding_executor
+from app.monitoring.metrics import record_warmup_pool_ready
+from app.threadpool import (
+    get_chat_executor,
+    get_embedding_executor,
+    get_rerank_executor,
+    get_vision_executor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +41,15 @@ class WarmupConfig:
     vram_budget_mb: float
     per_worker_vram_mb: float
     texts: list[str]
+    executors: dict[str, ThreadPoolExecutor]
+
+
+@dataclass(frozen=True, slots=True)
+class WarmupContext:
+    model_name: str
+    capability: str
+    device: DeviceLike
+    config: WarmupConfig
     executor: ThreadPoolExecutor
 
 
@@ -97,7 +112,12 @@ def warm_up_models(registry: ModelRegistry) -> list[str]:
     skiplist = _parse_list_env("WARMUP_SKIPLIST")
     texts = ["hello world"] * batch_size
 
-    executor = get_embedding_executor()
+    executors = {
+        "text-embedding": get_embedding_executor(),
+        "chat-completion": get_chat_executor(),
+        "vision": get_vision_executor(),
+        "rerank": get_rerank_executor(),
+    }
 
     _failed_models.clear()
     config = WarmupConfig(
@@ -107,7 +127,7 @@ def warm_up_models(registry: ModelRegistry) -> list[str]:
         vram_budget_mb=vram_budget_mb,
         per_worker_vram_mb=per_worker_vram_mb,
         texts=texts,
-        executor=executor,
+        executors=executors,
     )
 
     for name in registry.list_models():
@@ -139,7 +159,13 @@ def warm_up_models(registry: ModelRegistry) -> list[str]:
 
             ok = warmer(model, device, config)
             capability_results[capability] = ok
-            log_extra = {"model": name, "capability": capability}
+            executor = config.executors.get(capability)
+            log_extra = {
+                "model": name,
+                "capability": capability,
+            }
+            if executor is not None:
+                log_extra["executor"] = _executor_label(executor)
             if ok:
                 logger.info("warmup_ok", extra=log_extra)
             else:
@@ -158,11 +184,19 @@ def warm_up_models(registry: ModelRegistry) -> list[str]:
 
 def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
     if not isinstance(model, Embeds):
+        _record_pool_readiness(
+            model_name=getattr(model, "name", "unknown"),
+            capability="text-embedding",
+            executor=_executor_for_capability("text-embedding", config),
+            workers=0,
+            ready=False,
+        )
         logger.warning("warmup_no_embed", extra={"model": getattr(model, "name", "unknown")})
         return False
 
+    executor = _executor_for_capability("text-embedding", config)
     typed_model = cast(EmbeddingModel, model)
-    workers = max(1, getattr(config.executor, "_max_workers", 1))
+    workers = _executor_workers(executor)
     allowed_workers = _select_worker_count(
         device=device,
         executor_workers=workers,
@@ -183,7 +217,7 @@ def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupCon
                     texts=config.texts[: current_batch],
                     workers=current_workers,
                     use_inference_mode=config.use_inference_mode,
-                    executor=config.executor,
+                    executor=executor,
                 )
                 if _should_sync(device):
                     torch.cuda.synchronize(device)
@@ -197,6 +231,7 @@ def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupCon
                         "batch_size": current_batch,
                         "workers": current_workers,
                         "capability": "text-embedding",
+                        "executor": _executor_label(executor),
                     },
                 )
                 step_complete = True
@@ -209,16 +244,42 @@ def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupCon
                     exc=exc,
                 )
                 if not retry:
+                    _record_pool_readiness(
+                        model_name=getattr(model, "name", "unknown"),
+                        capability="text-embedding",
+                        executor=executor,
+                        workers=current_workers,
+                        ready=False,
+                    )
                     return False
             except Exception:  # pragma: no cover - startup guardrail
                 logger.exception(
                     "warmup_failed",
-                    extra={"model": getattr(model, "name", "unknown"), "step": step + 1},
+                    extra={
+                        "model": getattr(model, "name", "unknown"),
+                        "step": step + 1,
+                        "capability": "text-embedding",
+                        "executor": _executor_label(executor),
+                    },
+                )
+                _record_pool_readiness(
+                    model_name=getattr(model, "name", "unknown"),
+                    capability="text-embedding",
+                    executor=executor,
+                    workers=current_workers,
+                    ready=False,
                 )
                 return False
         if current_workers <= 0:
             break
 
+    _record_pool_readiness(
+        model_name=getattr(model, "name", "unknown"),
+        capability="text-embedding",
+        executor=executor,
+        workers=current_workers,
+        ready=True,
+    )
     return True
 
 
@@ -256,6 +317,121 @@ def _inference_context(enabled: bool) -> AbstractContextManager[None]:
     if hasattr(torch, "inference_mode"):
         return cast(AbstractContextManager[None], torch.inference_mode())
     return cast(AbstractContextManager[None], torch.no_grad())
+
+
+def _executor_for_capability(capability: str, config: WarmupConfig) -> ThreadPoolExecutor:
+    executor = config.executors.get(capability)
+    if executor is None:
+        fallback = config.executors.get("text-embedding") or get_embedding_executor()
+        config.executors[capability] = fallback
+        return fallback
+    return executor
+
+
+def _executor_label(executor: ThreadPoolExecutor) -> str:
+    return getattr(executor, "_thread_name_prefix", "executor")
+
+
+def _executor_workers(executor: ThreadPoolExecutor) -> int:
+    return max(1, getattr(executor, "_max_workers", 1))
+
+
+def _run_worker_tasks(executor: ThreadPoolExecutor, workers: int, func: Callable[[], None]) -> None:
+    if workers <= 1:
+        func()
+        return
+    futures = [executor.submit(func) for _ in range(workers)]
+    wait(futures)
+    for fut in futures:
+        fut.result()
+
+
+def _record_pool_readiness(
+    *,
+    model_name: str,
+    capability: str,
+    executor: ThreadPoolExecutor,
+    workers: int,
+    ready: bool,
+) -> None:
+    status = "warmup_pool_ready" if ready else "warmup_pool_unready"
+    ready_workers = workers if ready else 0
+    log_extra = {
+        "model": model_name,
+        "capability": capability,
+        "executor": _executor_label(executor),
+        "ready_workers": ready_workers,
+    }
+    if ready:
+        logger.info(status, extra=log_extra)
+    else:
+        logger.warning(status, extra=log_extra)
+    record_warmup_pool_ready(
+        model=model_name,
+        capability=capability,
+        executor=_executor_label(executor),
+        workers=ready_workers,
+    )
+
+
+def _warmup_with_executor(
+    *,
+    context: WarmupContext,
+    run_once: Callable[[], None],
+    step_extra: dict[str, float | int | str] | None = None,
+) -> bool:
+    workers = _select_worker_count(
+        device=context.device,
+        executor_workers=_executor_workers(context.executor),
+        per_worker_vram_mb=context.config.per_worker_vram_mb,
+        vram_budget_mb=context.config.vram_budget_mb,
+    )
+
+    for step in range(context.config.steps):
+        start = time.perf_counter()
+        try:
+            _run_worker_tasks(context.executor, workers, run_once)
+            if _should_sync(context.device):
+                torch.cuda.synchronize(context.device)
+            duration_ms = round((time.perf_counter() - start) * 1000, 2)
+            log_extra = {
+                "model": context.model_name,
+                "capability": context.capability,
+                "executor": _executor_label(context.executor),
+                "latency_ms": duration_ms,
+                "step": step + 1,
+                "workers": workers,
+            }
+            if step_extra:
+                log_extra.update(step_extra)
+            logger.info("warmup_step_ok", extra=log_extra)
+        except Exception:  # pragma: no cover - startup guardrail
+            logger.exception(
+                "warmup_failed",
+                extra={
+                    "model": context.model_name,
+                    "capability": context.capability,
+                    "executor": _executor_label(context.executor),
+                    "step": step + 1,
+                },
+            )
+            _record_pool_readiness(
+                model_name=context.model_name,
+                capability=context.capability,
+                executor=context.executor,
+                workers=workers,
+                ready=False,
+            )
+            return False
+
+    _record_pool_readiness(
+        model_name=context.model_name,
+        capability=context.capability,
+        executor=context.executor,
+        workers=workers,
+        ready=True,
+    )
+    return True
 
 
 def _select_worker_count(
@@ -306,6 +482,13 @@ def _is_cuda_device(device: DeviceLike) -> TypeGuard[CudaDeviceLike]:
 
 def _warmup_chat_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
     if not isinstance(model, Generates):
+        _record_pool_readiness(
+            model_name=getattr(model, "name", "unknown"),
+            capability="chat-completion",
+            executor=_executor_for_capability("chat-completion", config),
+            workers=0,
+            ready=False,
+        )
         logger.warning(
             "warmup_no_generator", extra={"model": getattr(model, "name", "unknown")}
         )
@@ -314,10 +497,10 @@ def _warmup_chat_model(model: object, device: DeviceLike, config: WarmupConfig) 
     messages = [
         {"role": "user", "content": "Hello!"},
     ]
-    context = _inference_context(enabled=config.use_inference_mode)
-    try:
-        start = time.perf_counter()
-        with context:
+    executor = _executor_for_capability("chat-completion", config)
+
+    def _generate_once() -> None:
+        with _inference_context(enabled=config.use_inference_mode):
             model.generate(
                 messages,
                 max_new_tokens=8,
@@ -325,28 +508,30 @@ def _warmup_chat_model(model: object, device: DeviceLike, config: WarmupConfig) 
                 top_p=1.0,
                 stop=None,
             )
-        if _should_sync(device):
-            torch.cuda.synchronize(device)
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        logger.info(
-            "warmup_step_ok",
-            extra={
-                "model": getattr(model, "name", "unknown"),
-                "capability": "chat-completion",
-                "latency_ms": duration_ms,
-            },
-        )
-        return True
-    except Exception:  # pragma: no cover - startup guardrail
-        logger.exception(
-            "warmup_failed",
-            extra={"model": getattr(model, "name", "unknown"), "capability": "chat-completion"},
-        )
-        return False
+
+    context = WarmupContext(
+        model_name=getattr(model, "name", "unknown"),
+        capability="chat-completion",
+        device=device,
+        config=config,
+        executor=executor,
+    )
+
+    return _warmup_with_executor(
+        context=context,
+        run_once=_generate_once,
+    )
 
 
 def _warmup_vision_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
     if not isinstance(model, Generates):
+        _record_pool_readiness(
+            model_name=getattr(model, "name", "unknown"),
+            capability="vision",
+            executor=_executor_for_capability("vision", config),
+            workers=0,
+            ready=False,
+        )
         logger.warning(
             "warmup_no_generator", extra={"model": getattr(model, "name", "unknown")}
         )
@@ -366,10 +551,10 @@ def _warmup_vision_model(model: object, device: DeviceLike, config: WarmupConfig
             ],
         }
     ]
-    context = _inference_context(enabled=config.use_inference_mode)
-    try:
-        start = time.perf_counter()
-        with context:
+    executor = _executor_for_capability("vision", config)
+
+    def _generate_once() -> None:
+        with _inference_context(enabled=config.use_inference_mode):
             model.generate(
                 messages,
                 max_new_tokens=8,
@@ -377,41 +562,63 @@ def _warmup_vision_model(model: object, device: DeviceLike, config: WarmupConfig
                 top_p=1.0,
                 stop=None,
             )
-        if _should_sync(device):
-            torch.cuda.synchronize(device)
-        duration_ms = round((time.perf_counter() - start) * 1000, 2)
-        logger.info(
-            "warmup_step_ok",
-            extra={
-                "model": getattr(model, "name", "unknown"),
-                "capability": "vision",
-                "latency_ms": duration_ms,
-            },
-        )
-        return True
-    except Exception:  # pragma: no cover - startup guardrail
-        logger.exception(
-            "warmup_failed",
-            extra={"model": getattr(model, "name", "unknown"), "capability": "vision"},
-        )
-        return False
+
+    context = WarmupContext(
+        model_name=getattr(model, "name", "unknown"),
+        capability="vision",
+        device=device,
+        config=config,
+        executor=executor,
+    )
+
+    return _warmup_with_executor(
+        context=context,
+        run_once=_generate_once,
+    )
 
 
 def _warmup_rerank_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:
     # Placeholder implementation for rerank-capable models.
     try:
         if not isinstance(model, RerankModel):
+            _record_pool_readiness(
+                model_name=getattr(model, "name", "unknown"),
+                capability="rerank",
+                executor=_executor_for_capability("rerank", config),
+                workers=0,
+                ready=False,
+            )
             logger.warning("warmup_no_rerank", extra={"model": getattr(model, "name", "unknown")})
             return False
-        with _inference_context(enabled=config.use_inference_mode):
-            model.rerank(query="warmup query", documents=["doc one", "doc two"])
-        if _should_sync(device):
-            torch.cuda.synchronize(device)
-        return True
+        executor = _executor_for_capability("rerank", config)
+
+        def _rerank_once() -> None:
+            with _inference_context(enabled=config.use_inference_mode):
+                model.rerank(query="warmup query", documents=["doc one", "doc two"])
+
+        context = WarmupContext(
+            model_name=getattr(model, "name", "unknown"),
+            capability="rerank",
+            device=device,
+            config=config,
+            executor=executor,
+        )
+
+        return _warmup_with_executor(
+            context=context,
+            run_once=_rerank_once,
+        )
     except Exception:  # pragma: no cover - startup guardrail
         logger.exception(
             "warmup_failed",
             extra={"model": getattr(model, "name", "unknown"), "capability": "rerank"},
+        )
+        _record_pool_readiness(
+            model_name=getattr(model, "name", "unknown"),
+            capability="rerank",
+            executor=_executor_for_capability("rerank", config),
+            workers=0,
+            ready=False,
         )
         return False
 

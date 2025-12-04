@@ -85,6 +85,12 @@ CACHE_MISSES = Counter(
     labelnames=("model",),
 )
 
+WARMUP_POOL_READY = Gauge(
+    "warmup_pool_ready_workers",
+    "Number of executor workers warmed up per model/capability",
+    labelnames=("model", "capability", "executor"),
+)
+
 
 def setup_metrics(app: Starlette) -> None:
     if os.getenv("ENABLE_METRICS", "1") == "0":
@@ -156,3 +162,8 @@ def record_audio_request(model: str, status: str) -> None:
 def observe_audio_latency(model: str, seconds: float) -> None:
     with suppress(Exception):
         AUDIO_REQUEST_LATENCY.labels(model=model).observe(seconds)
+
+
+def record_warmup_pool_ready(model: str, capability: str, executor: str, workers: int) -> None:
+    with suppress(Exception):
+        WARMUP_POOL_READY.labels(model=model, capability=capability, executor=executor).set(workers)
