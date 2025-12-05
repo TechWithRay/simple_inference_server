@@ -47,6 +47,47 @@ _torch.xpu = getattr(
 )
 _torch.no_grad = getattr(_torch, "no_grad", contextlib.nullcontext)
 
+
+class _FakeTorchDevice:
+    """Minimal torch.device stub for testing."""
+
+    def __init__(self, device: str) -> None:
+        self._device = str(device)
+        # Parse device type and index
+        if ":" in self._device:
+            self._type, idx_str = self._device.split(":", 1)
+            self._index: int | None = int(idx_str)
+        else:
+            self._type = self._device
+            self._index = None
+
+    @property
+    def type(self) -> str:
+        return self._type
+
+    @property
+    def index(self) -> int | None:
+        return self._index
+
+    def __str__(self) -> str:
+        return self._device
+
+    def __repr__(self) -> str:
+        return f"device(type='{self._type}')"
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, _FakeTorchDevice):
+            return self._device == other._device
+        if isinstance(other, str):
+            return self._device == other
+        return False
+
+    def __hash__(self) -> int:
+        return hash(self._device)
+
+
+_torch.device = getattr(_torch, "device", _FakeTorchDevice)
+
 sys.modules["torch"] = _torch
 
 # Pillow is also imported in some modules; provide a lightweight stub.

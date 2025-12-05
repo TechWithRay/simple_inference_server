@@ -26,7 +26,7 @@ def test_whisper_transcribe_adds_cancel_stopper(monkeypatch: pytest.MonkeyPatch)
         captured_kwargs.update(generate_kwargs)
         return {"text": "ok", "language": "en", "chunks": []}
 
-    obj.pipeline = fake_pipeline  # type: ignore[assignment]
+    obj.pipeline = fake_pipeline
 
     cancel_event = threading.Event()
     obj.transcribe(

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import threading
 import time
 from typing import Annotated, Any
 
-import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
@@ -25,8 +23,13 @@ from app.concurrency.limiter import (
 from app.dependencies import get_model_registry
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import observe_latency, record_request
+from app.routes.common import (
+    _ClientDisconnectedError,
+    _RequestCancelledError,
+    _run_work_with_client_cancel,
+    _WorkTimeoutError,
+)
 from app.threadpool import get_embedding_count_executor, get_embedding_executor
-from app.routes.common import _ClientDisconnectedError, _RequestCancelledError, _WorkTimeoutError, _run_work_with_client_cancel
 
 router = APIRouter()
 
@@ -100,7 +103,7 @@ async def _build_embedding_usage(model: Any, texts: list[str]) -> Usage:
     return Usage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens, completion_tokens=None)
 
 
-async def _run_embedding_generation(
+async def _run_embedding_generation(  # noqa: PLR0913 - explicit kwargs for clarity
     *,
     registry: ModelRegistry,
     model_name: str,
@@ -250,9 +253,9 @@ async def create_embeddings(  # noqa: PLR0912
     usage_model = registry.get(req.model)
     usage = await _build_embedding_usage(usage_model, texts)
     return EmbeddingResponse(data=data, model=req.model, usage=usage)
-def _get_embedding_limiter():
+def _get_embedding_limiter() -> Any:
     try:
-        from app import api as api_module  # type: ignore
+        from app import api as api_module  # noqa: PLC0415 - local import to avoid circular import
 
         return getattr(api_module, "embedding_limiter", embedding_limiter)
     except Exception:

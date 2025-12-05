@@ -2,9 +2,9 @@ import logging
 
 from fastapi import APIRouter
 
-from app.concurrency.limiter import embedding_limiter, QUEUE_TIMEOUT_SEC
+from app.concurrency.limiter import QUEUE_TIMEOUT_SEC, embedding_limiter
 from app.routes import audio, chat, embeddings, health
-from app.routes.audio import _save_upload, UPLOAD_CHUNK_BYTES
+from app.routes.audio import UPLOAD_CHUNK_BYTES, _save_upload
 from app.routes.common import _await_executor_cleanup
 
 logger = logging.getLogger(__name__)

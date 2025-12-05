@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from typing import Any
 
 from fastapi import Request
-
-import os
 
 EXECUTOR_GRACE_PERIOD = float(os.getenv("EXECUTOR_GRACE_PERIOD_SEC", "2.0"))
 
@@ -38,7 +37,7 @@ async def _cancel_on_disconnect(request: Request, event: threading.Event) -> Non
 
 
 async def _await_executor_cleanup(
-    work_task: "asyncio.Future[Any]",
+    work_task: asyncio.Future[Any],
     grace_period: float,
     reason: str,
 ) -> None:
@@ -51,7 +50,7 @@ async def _await_executor_cleanup(
         await asyncio.wait_for(asyncio.shield(work_task), timeout=grace_period)
     except TimeoutError:
         try:
-            from app import api as api_module  # type: ignore
+            from app import api as api_module  # noqa: PLC0415 - local import to avoid circular import
 
             log_obj = getattr(api_module, "logger", logging.getLogger(__name__))
         except Exception:
@@ -69,7 +68,7 @@ async def _await_executor_cleanup(
 
 async def _run_work_with_client_cancel(  # noqa: D401
     request: Request,
-    work_task: "asyncio.Future[Any]",
+    work_task: asyncio.Future[Any],
     cancel_event: threading.Event,
     timeout: float,
 ) -> Any:

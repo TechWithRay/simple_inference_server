@@ -23,16 +23,19 @@ from app.concurrency.audio_limiter import (
     set_queue_label as set_audio_queue_label,
 )
 from app.dependencies import get_model_registry
-from app.models.base import SpeechResult, SpeechSegment
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import (
     observe_audio_latency,
     record_audio_request,
 )
-from app.state import WarmupStatus
+from app.routes.common import (
+    _ClientDisconnectedError,
+    _RequestCancelledError,
+    _run_work_with_client_cancel,
+    _WorkTimeoutError,
+)
 from app.threadpool import get_audio_executor
 from app.utils.uploads import chunked_upload_to_tempfile
-from app.routes.common import _ClientDisconnectedError, _RequestCancelledError, _WorkTimeoutError, _run_work_with_client_cancel
 
 router = APIRouter()
 logger = __import__("logging").getLogger(__name__)
@@ -83,7 +86,7 @@ def _vtt_from_segments(segments: list[dict[str, float | str]]) -> str:
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", start))
         text = str(seg.get("text", "")).strip()
-        lines.append(f"{_format_ts(start, sep='.') } --> {_format_ts(end, sep='.')}".replace(",", "."))
+        lines.append(f"{_format_ts(start, sep='.')} --> {_format_ts(end, sep='.')}".replace(",", "."))
         lines.append(text)
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -108,21 +111,10 @@ def _select_granularity(values: list[str] | None) -> Literal["word", "segment", 
     return None
 
 
-def _resolve_warmup_status(request: Request | None) -> WarmupStatus:
-    if request is None:
-        return WarmupStatus()
-
-    status_obj = getattr(request.app.state, "warmup_status", None)
-    if isinstance(status_obj, WarmupStatus):
-        return status_obj
-
-    return WarmupStatus()
-
-
 async def _save_upload(file: UploadFile, max_bytes: int = MAX_AUDIO_BYTES) -> tuple[str, int]:
     suffix = Path(file.filename or "").suffix or ".wav"
     try:
-        from app import api as api_module  # local import to avoid circular import at module load
+        from app import api as api_module  # noqa: PLC0415 - local import to avoid circular import
 
         chunk_size = getattr(api_module, "UPLOAD_CHUNK_BYTES", UPLOAD_CHUNK_BYTES)
     except Exception:
@@ -329,7 +321,7 @@ async def _handle_audio_request(  # noqa: PLR0913
     try:
         # Allow tests to monkeypatch api._save_upload
         try:
-            from app import api as api_module  # type: ignore
+            from app import api as api_module  # noqa: PLC0415 - local import for test patching
 
             save_fn = getattr(api_module, "_save_upload", _save_upload)
         except Exception:

@@ -31,8 +31,13 @@ from app.monitoring.metrics import (
     observe_chat_latency,
     record_chat_request,
 )
+from app.routes.common import (
+    _ClientDisconnectedError,
+    _RequestCancelledError,
+    _run_work_with_client_cancel,
+    _WorkTimeoutError,
+)
 from app.threadpool import get_chat_executor
-from app.routes.common import _ClientDisconnectedError, _RequestCancelledError, _WorkTimeoutError, _run_work_with_client_cancel
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -49,7 +54,7 @@ class ChatContentPart(BaseModel):
     image_url: ImageURL | None = None
 
     @staticmethod
-    def _assert_valid(part: "ChatContentPart") -> "ChatContentPart":
+    def _assert_valid(part: ChatContentPart) -> ChatContentPart:
         if part.type == "text" and part.text is None:
             raise ValueError("text content part requires 'text'")
         if part.type == "image_url" and (part.image_url is None or not part.image_url.url):

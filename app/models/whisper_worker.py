@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing.connection
 import os
 import traceback
 from typing import Any
@@ -8,7 +9,7 @@ import torch
 from transformers import WhisperForConditionalGeneration, WhisperProcessor, pipeline
 
 
-def _worker_loop(conn, hf_repo_id: str, device: str) -> None:
+def _worker_loop(conn: multiprocessing.connection.Connection, hf_repo_id: str, device: str) -> None:
     """Subprocess loop owning a Whisper pipeline.
 
     Receives dict messages over a Pipe; expected shape:
@@ -71,8 +72,9 @@ def _worker_loop(conn, hf_repo_id: str, device: str) -> None:
                     generate_kwargs["prompt_ids"] = prompt_ids
                 except Exception:
                     pass
-            if msg.get("temperature") is not None:
-                generate_kwargs["temperature"] = float(msg.get("temperature"))
+            temperature = msg.get("temperature")
+            if temperature is not None:
+                generate_kwargs["temperature"] = float(temperature)
 
             return_ts: bool | str = False
             gran = msg.get("ts_granularity")

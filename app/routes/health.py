@@ -128,7 +128,7 @@ async def health(
     )
 
     if http_status != status.HTTP_200_OK:
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse  # noqa: PLC0415 - conditional import
 
         return JSONResponse(status_code=http_status, content=response.model_dump())
 

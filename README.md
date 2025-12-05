@@ -145,6 +145,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Offline-first: loads only local weights; HF cache under `./models` by default
 - Queue wait histograms for embeddings/chat/audio plus batch wait metrics to tune backpressure.
 - Optional Whisper subprocess mode (`WHISPER_USE_SUBPROCESS=1`) provides hard cancellation by killing a per-handler worker process when requests are cancelled/time out; tune poll/idle/max-wall via envs.
+- **Request tracing**: every request is assigned a unique ID (UUID hex). Pass `X-Request-ID` header to propagate your own; the same ID is echoed in the response header and included in JSON logs for distributed tracing.
 
 ## Built-in models (catalog)
 
@@ -348,7 +349,6 @@ Unsupported or unregistered `model` values return `404 Model not found`. Be sure
   - `POST /embedding`: generate embedding of a given text
   - `POST /embeddings`: non-OpenAI-compatible embeddings API
 - OpenAI-style streaming chat completions (SSE/chunked responses)
-- Request/trace IDs: include a per-request ID in logs and responses for easier tracing.
 - Remote image telemetry / tuning: remote fetch is guardrailed with host allowlists, private IP blocking, MIME sniffing, size caps, and redirect checks. Counters at `remote_image_rejections_total{reason}` capture rejects by reason (size/mime/host/private_ip/disabled/allowlist_missing).
 - Rerank: implement lightweight rerank handler/endpoint once a backend is chosen (current codepath removed).
 - Test additions: vision chat path, non-batch chat serialization, prompt-length guard, warmup OOM surfacing.

@@ -11,6 +11,7 @@ import torch
 import yaml
 
 from app.models.base import ChatModel, EmbeddingModel
+from app.utils.device import resolve_device
 
 logger = logging.getLogger(__name__)
 
@@ -25,47 +26,9 @@ class ModelRegistry:
         self.models: dict[str, Any] = {}
         # Prefer CLI/env provided device; fall back to auto-detection.
         self.device_preference: str = (device or os.getenv("MODEL_DEVICE") or "auto")
-        self.device = self._resolve_device(self.device_preference)
+        self.device = resolve_device(self.device_preference, validate=True)
         self.allowed_models = {m.strip() for m in allowed_models or [] if m.strip()} or None
         self._load_from_config(config_path)
-
-    def _resolve_device(self, preference: str | None) -> str:  # noqa: PLR0911
-        pref = (preference or "auto").lower()
-        has_cuda = torch.cuda.is_available()
-        has_mps = getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
-
-        if pref == "auto":
-            if has_cuda:
-                return "cuda"
-            if has_mps:
-                return "mps"
-            return "cpu"
-
-        if pref == "cpu":
-            return "cpu"
-
-        if pref == "mps":
-            if not has_mps:
-                raise ValueError("MPS requested but not available")
-            return "mps"
-
-        if pref.startswith("cuda"):
-            if not has_cuda:
-                raise ValueError("CUDA requested but not available")
-
-            if ":" in pref:
-                _, idx_str = pref.split(":", 1)
-                if not idx_str.isdigit():
-                    raise ValueError(f"Invalid CUDA device format: {preference}")
-                idx = int(idx_str)
-                count = torch.cuda.device_count()
-                if idx >= count:
-                    raise ValueError(f"Requested cuda:{idx} but only {count} device(s) visible")
-                return f"cuda:{idx}"
-
-            return "cuda"
-
-        raise ValueError(f"Unknown device preference: {preference}")
 
     def _load_from_config(self, path: str) -> None:
         path_obj = Path(path)

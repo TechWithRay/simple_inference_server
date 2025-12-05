@@ -1,13 +1,17 @@
+from typing import Any
+
 import pytest
+from prometheus_client import Counter
 
 from app.models.qwen_vl import QwenVLChat
-from app.monitoring.metrics import REMOTE_IMAGE_REJECTIONS, record_remote_image_rejection
+from app.monitoring.metrics import REMOTE_IMAGE_REJECTIONS
 
 
-def _reset_metric(metric) -> None:
+def _reset_metric(metric: Counter) -> None:
     # prometheus_client Counters cannot be reset directly; recreate collector values
-    for labelset in list(metric._metrics.keys()):  # type: ignore[attr-defined]
-        metric._metrics.pop(labelset, None)
+    metrics_dict: dict[Any, Any] = getattr(metric, "_metrics", {})
+    for labelset in list(metrics_dict.keys()):
+        metrics_dict.pop(labelset, None)
 
 
 def test_remote_image_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,7 +48,7 @@ def test_data_uri_mime_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class DummyImageModule:
         @staticmethod
-        def open(_buf):
+        def open(_buf: Any) -> DummyImage:
             return DummyImage("PNG")
 
     monkeypatch.setattr("app.models.qwen_vl.Image", DummyImageModule)
@@ -74,10 +78,10 @@ def test_remote_image_rejection_metric(monkeypatch: pytest.MonkeyPatch) -> None:
             pass
 
     class DummyClient:
-        def head(self, *_args, **_kwargs):
+        def head(self, *_args: Any, **_kwargs: Any) -> DummyResp:
             return DummyResp()
 
-        def stream(self, *_args, **_kwargs):  # pragma: no cover - unused because size reject on HEAD
+        def stream(self, *_args: Any, **_kwargs: Any) -> None:  # pragma: no cover - unused
             raise RuntimeError("should not stream")
 
     monkeypatch.setattr(obj, "_get_http_client", lambda timeout: DummyClient())
@@ -86,4 +90,5 @@ def test_remote_image_rejection_metric(monkeypatch: pytest.MonkeyPatch) -> None:
         obj._load_image("http://example.com/img.png")
 
     # Expect size rejection recorded
-    assert REMOTE_IMAGE_REJECTIONS._metrics  # type: ignore[attr-defined]
+    metrics_dict: dict[Any, Any] = getattr(REMOTE_IMAGE_REJECTIONS, "_metrics", {})
+    assert metrics_dict

@@ -6,7 +6,10 @@ from typing import Any
 
 
 class JsonFormatter(logging.Formatter):
-    """Minimal JSON log formatter for structured logs."""
+    """Minimal JSON log formatter for structured logs.
+
+    Automatically includes request_id from the middleware context if available.
+    """
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
         base: dict[str, Any] = {
@@ -15,6 +18,17 @@ class JsonFormatter(logging.Formatter):
             "timestamp": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S%z"),
             "message": record.getMessage(),
         }
+
+        # Include request_id from context if available
+        try:
+            from app.middleware.request_id import get_request_id  # noqa: PLC0415 - lazy import
+
+            request_id = get_request_id()
+            if request_id:
+                base["request_id"] = request_id
+        except ImportError:
+            pass  # Middleware not loaded yet during early startup
+
         # include any custom extras if present
         for key, value in record.__dict__.items():
             if key in base or key.startswith("_"):
