@@ -38,6 +38,7 @@ _REQUEUE_MAX_TASKS = int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64"))
 _PREPARE_TIMEOUT_SEC = float(os.getenv("CHAT_PREPARE_TIMEOUT_SEC", "10"))
 _GENERATE_TIMEOUT_SEC = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
 _OOM_COOLDOWN_SEC = float(os.getenv("CHAT_OOM_COOLDOWN_SEC", "300"))  # 5 minutes default
+_EXECUTOR_GRACE_PERIOD_SEC = float(os.getenv("EXECUTOR_GRACE_PERIOD_SEC", "2.0"))
 
 
 @dataclass
@@ -254,18 +255,17 @@ class ChatBatcher:
                         continue
                     batch_items = alive_items
 
+                run_batch = functools.partial(self._generate_batch, list(batch_items))
+                run_future = asyncio.wrap_future(loop.run_in_executor(executor, run_batch))
                 try:
-                    run_batch = functools.partial(self._generate_batch, list(batch_items))
-                    results = await asyncio.wait_for(
-                        loop.run_in_executor(executor, run_batch),
-                        timeout=_GENERATE_TIMEOUT_SEC,
-                    )
+                    results = await asyncio.wait_for(run_future, timeout=_GENERATE_TIMEOUT_SEC)
                 except TimeoutError:  # pragma: no cover - defensive
                     for bi in batch_items:
                         bi.cancel_event.set()
                         if not bi.future.done():
                             bi.future.set_exception(ChatBatchQueueTimeoutError("Chat generation timed out"))
                     record_chat_batch_queue_rejection(self.model_name)
+                    await _await_future_grace(run_future, reason="chat_generate_timeout")
                     continue
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.exception(
@@ -506,6 +506,27 @@ def get_count_executor(*, use_chat_executor: bool = False) -> ThreadPoolExecutor
     """Public helper to reuse the chat token counting pool."""
 
     return _get_count_executor(use_chat_executor=use_chat_executor)
+
+
+async def _await_future_grace(fut: asyncio.Future[Any], *, reason: str) -> None:
+    """Wait briefly for an executor future after signalling cancellation.
+
+    Mirrors the API-layer grace period handling so batched generation doesn't
+    leave long-running work pinned to the chat executor after timeouts.
+    """
+
+    if fut.done():
+        return
+
+    try:
+        await asyncio.wait_for(asyncio.shield(fut), timeout=_EXECUTOR_GRACE_PERIOD_SEC)
+    except TimeoutError:
+        logger.warning(
+            "chat_executor_overrun",
+            extra={"reason": reason, "grace_period_sec": _EXECUTOR_GRACE_PERIOD_SEC},
+        )
+    except Exception:  # noqa: S110 - best-effort cleanup
+        return
 
 
 class ChatBatchingService:

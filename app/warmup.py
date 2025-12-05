@@ -18,7 +18,12 @@ from typing import Any, Protocol, TypeGuard, cast, runtime_checkable
 import torch
 from PIL import Image
 
-from app.concurrency.limiter import MAX_CONCURRENT
+from app.concurrency.audio_limiter import MAX_CONCURRENT as AUDIO_MAX_CONCURRENT
+from app.concurrency.limiter import (
+    CHAT_MAX_CONCURRENT,
+    EMBEDDING_MAX_CONCURRENT,
+    MAX_CONCURRENT,
+)
 from app.models.base import EmbeddingModel, SpeechModel
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import record_warmup_pool_ready
@@ -330,6 +335,7 @@ def _warmup_with_executor(
         executor_workers=_executor_workers(context.executor),
         per_worker_vram_mb=context.config.per_worker_vram_mb,
         vram_budget_mb=context.config.vram_budget_mb,
+        capability=context.capability,
     )
 
     for step in range(context.config.steps):
@@ -398,8 +404,10 @@ def _select_worker_count(
     executor_workers: int,
     per_worker_vram_mb: float,
     vram_budget_mb: float,
+    capability: str | None,
 ) -> int:
-    base = max(1, min(executor_workers, MAX_CONCURRENT))
+    base_limit = _capability_concurrency(capability)
+    base = max(1, min(executor_workers, base_limit))
     if not _is_cuda_device(device):
         return base
 
@@ -410,6 +418,16 @@ def _select_worker_count(
 
     allowed_by_budget = max(1, int(budget_mb // per_worker_vram_mb))
     return max(1, min(base, allowed_by_budget))
+
+
+def _capability_concurrency(capability: str | None) -> int:
+    if capability == "text-embedding":
+        return EMBEDDING_MAX_CONCURRENT
+    if capability in {"chat-completion", "vision"}:
+        return CHAT_MAX_CONCURRENT
+    if capability and capability.startswith("audio"):
+        return AUDIO_MAX_CONCURRENT
+    return MAX_CONCURRENT
 
 
 def _available_vram_mb(device: DeviceLike) -> float:

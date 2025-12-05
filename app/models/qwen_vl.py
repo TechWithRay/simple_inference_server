@@ -26,6 +26,7 @@ from app.models.generation_utils import (
     resolve_runtime_device,
     trim_with_stop,
 )
+from app.monitoring.metrics import record_remote_image_rejection
 
 logger = logging.getLogger(__name__)
 
@@ -413,20 +414,27 @@ class QwenVLChat(ChatModel):
                 raise ValueError("Invalid data URI for image_url") from exc
             data = base64.b64decode(b64_data)
             if max_bytes and len(data) > max_bytes:
+                record_remote_image_rejection("size")
                 raise ValueError("Image too large")
-            return Image.open(io.BytesIO(data)).convert("RGB")
+            img = Image.open(io.BytesIO(data))
+            _validate_image_format(img, mime_allowlist)
+            return img.convert("RGB")
 
         if source.startswith("http://") or source.startswith("https://"):
             if not allow_remote:
+                record_remote_image_rejection("disabled")
                 raise ValueError("Remote image URLs are disabled (set ALLOW_REMOTE_IMAGES=1 to enable)")
 
             parsed = urllib.parse.urlparse(source)
             if not parsed.hostname:
+                record_remote_image_rejection("host")
                 raise ValueError("Remote image host missing")
             if not host_allowlist:
                 # TODO: tighten remote fetch safety (private ranges, content sniffing) if remote images are enabled.
+                record_remote_image_rejection("allowlist_missing")
                 raise ValueError("Remote image host allowlist is empty; set REMOTE_IMAGE_HOST_ALLOWLIST to enable remote fetch")
             if parsed.hostname not in host_allowlist:
+                record_remote_image_rejection("host")
                 raise ValueError("Remote image host not allowed")
             _reject_private_ip(parsed.hostname)
 
@@ -438,9 +446,11 @@ class QwenVLChat(ChatModel):
                 _ensure_public_url(head_resp.url)
                 content_length = int(head_resp.headers.get("content-length", "0") or 0)
                 if max_bytes and content_length and content_length > max_bytes:
+                    record_remote_image_rejection("size")
                     raise ValueError("Remote image too large")
                 content_type = (head_resp.headers.get("content-type") or "").split(";")[0].lower()
                 if mime_allowlist and content_type and content_type not in mime_allowlist:
+                    record_remote_image_rejection("mime")
                     raise ValueError("Remote image MIME not allowed")
             finally:
                 head_resp.close()
@@ -454,15 +464,20 @@ class QwenVLChat(ChatModel):
                         break
                     buf.write(chunk)
                     if max_bytes and buf.tell() > max_bytes:
+                        record_remote_image_rejection("size")
                         raise ValueError("Remote image too large")
                 buf.seek(0)
-                return Image.open(buf).convert("RGB")
+                img = Image.open(buf)
+                _validate_image_format(img, mime_allowlist)
+                return img.convert("RGB")
 
         # Assume local file path
         path = Path(source).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"Image not found at path: {source}")
-        return Image.open(path).convert("RGB")
+        img = Image.open(path)
+        _validate_image_format(img, mime_allowlist)
+        return img.convert("RGB")
 
 
 def _reject_private_ip(host: str) -> None:
@@ -493,3 +508,24 @@ def _ensure_public_url(url: httpx.URL) -> None:
     if host is None:
         raise ValueError("Remote image host missing")
     _reject_private_ip(host)
+
+
+def _mime_from_format(fmt: str | None) -> str | None:
+    if fmt is None:
+        return None
+    mapping = {
+        "png": "image/png",
+        "jpeg": "image/jpeg",
+        "jpg": "image/jpeg",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }
+    return mapping.get(fmt.lower())
+
+
+def _validate_image_format(img: Image.Image, allowed: set[str]) -> None:
+    if not allowed:
+        return
+    mime = _mime_from_format(img.format)
+    if mime is None or mime not in allowed:
+        raise ValueError("Remote image MIME not allowed")

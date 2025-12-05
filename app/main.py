@@ -326,6 +326,7 @@ def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, c
 async def shutdown(
     batching_service: BatchingService | None,
     chat_batching_service: ChatBatchingService | None,
+    registry: ModelRegistry | None = None,
 ) -> None:
     stop_accepting()
     stop_accepting_audio()
@@ -337,6 +338,14 @@ async def shutdown(
     if chat_batching_service is not None:
         await chat_batching_service.stop()
         state.chat_batching_service = None
+    if registry is not None:
+        for model in registry.models.values():
+            close_fn = getattr(model, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:  # pragma: no cover - best-effort shutdown
+                    logger.warning("model_close_failed", extra={"model": getattr(model, "name", "unknown")})
     state.warmup_status = WarmupStatus()
     shutdown_count_executor()
     shutdown_executors()
@@ -357,7 +366,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         setup_metrics(app)
         yield
     finally:
-        await shutdown(batching_service, chat_batching_service)
+        await shutdown(batching_service, chat_batching_service, registry)
 
 
 app = FastAPI(title="Inference Service", lifespan=lifespan)

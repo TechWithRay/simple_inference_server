@@ -144,6 +144,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Micro-batching for embeddings, bounded concurrency and request guards
 - Offline-first: loads only local weights; HF cache under `./models` by default
 - Queue wait histograms for embeddings/chat/audio plus batch wait metrics to tune backpressure.
+- Optional Whisper subprocess mode (`WHISPER_USE_SUBPROCESS=1`) provides hard cancellation by killing a per-handler worker process when requests are cancelled/time out; tune poll/idle/max-wall via envs.
 
 ## Built-in models (catalog)
 
@@ -202,6 +203,8 @@ Per-model generation defaults (temperature / top_p / max_tokens) can be set in `
   - Includes warmup status per model and capability so operators can spot partial warmups.
 - `GET /metrics`: Prometheus metrics (enabled by default; toggle via `ENABLE_METRICS`).
   - Key histograms: `embedding_request_latency_seconds`, `embedding_request_queue_wait_seconds{model}`, `embedding_batch_wait_seconds{model}`, `chat_request_queue_wait_seconds{model}`, `chat_batch_wait_seconds{model}`, `audio_request_queue_wait_seconds{model}`.
+  - Whisper subprocess telemetry: `whisper_subprocess_restarts_total`, `whisper_subprocess_kills_total`, `whisper_subprocess_init_failures_total`.
+  - Remote image rejections: `remote_image_rejections_total{reason}` (reason ∈ size,mime,host,private_ip,disabled,allowlist_missing).
 
 ## Quick start (dev)
 
@@ -346,7 +349,7 @@ Unsupported or unregistered `model` values return `404 Model not found`. Be sure
   - `POST /embeddings`: non-OpenAI-compatible embeddings API
 - OpenAI-style streaming chat completions (SSE/chunked responses)
 - Request/trace IDs: include a per-request ID in logs and responses for easier tracing.
-- Remote image telemetry / tuning: add bandwidth/throughput metrics for remote image fetch and finer-grained limits; remote fetch is already guardrailed with host allowlists, private IP blocking, MIME sniffing, size caps, and redirect checks.
+- Remote image telemetry / tuning: remote fetch is guardrailed with host allowlists, private IP blocking, MIME sniffing, size caps, and redirect checks. Counters at `remote_image_rejections_total{reason}` capture rejects by reason (size/mime/host/private_ip/disabled/allowlist_missing).
 - Rerank: implement lightweight rerank handler/endpoint once a backend is chosen (current codepath removed).
 - Test additions: vision chat path, non-batch chat serialization, prompt-length guard, warmup OOM surfacing.
 

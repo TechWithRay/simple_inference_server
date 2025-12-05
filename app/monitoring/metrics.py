@@ -113,6 +113,30 @@ AUDIO_REQUEST_QUEUE_WAIT = Histogram(
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0),
 )
 
+WHISPER_SUBPROC_RESTARTS = Counter(
+    "whisper_subprocess_restarts_total",
+    "Number of times a Whisper subprocess was (re)started",
+    labelnames=("model",),
+)
+
+WHISPER_SUBPROC_KILLS = Counter(
+    "whisper_subprocess_kills_total",
+    "Number of times a Whisper subprocess was force-killed",
+    labelnames=("model",),
+)
+
+WHISPER_SUBPROC_INIT_FAILURES = Counter(
+    "whisper_subprocess_init_failures_total",
+    "Number of times Whisper subprocess initialization failed",
+    labelnames=("model",),
+)
+
+REMOTE_IMAGE_REJECTIONS = Counter(
+    "remote_image_rejections_total",
+    "Count of remote image fetch rejections by reason",
+    labelnames=("reason",),
+)
+
 QUEUE_REJECTIONS = Counter(
     "embedding_queue_rejections_total",
     "Requests rejected due to queue limits",
@@ -259,6 +283,26 @@ def observe_audio_queue_wait(model: str, seconds: float) -> None:
 def record_warmup_pool_ready(model: str, capability: str, executor: str, workers: int) -> None:
     with suppress(Exception):
         WARMUP_POOL_READY.labels(model=model, capability=capability, executor=executor).set(workers)
+
+
+def record_whisper_restart(model: str) -> None:
+    with suppress(Exception):
+        WHISPER_SUBPROC_RESTARTS.labels(model=model).inc()
+
+
+def record_whisper_kill(model: str) -> None:
+    with suppress(Exception):
+        WHISPER_SUBPROC_KILLS.labels(model=model).inc()
+
+
+def record_whisper_init_failure(model: str) -> None:
+    with suppress(Exception):
+        WHISPER_SUBPROC_INIT_FAILURES.labels(model=model).inc()
+
+
+def record_remote_image_rejection(reason: str) -> None:
+    with suppress(Exception):
+        REMOTE_IMAGE_REJECTIONS.labels(reason=reason).inc()
 AUDIO_GENERIC_LABEL_WARN = Counter(
     "audio_queue_generic_label_warn_total",
     "Audio limiter used generic label instead of model/task",
