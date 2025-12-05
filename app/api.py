@@ -416,12 +416,7 @@ class HealthResponse(BaseModel):
     runtime_config: dict[str, Any] | None = None
 
 
-@router.post("/v1/embeddings", response_model=EmbeddingResponse)
-async def create_embeddings(  # noqa: PLR0912, PLR0915
-    req: EmbeddingRequest,
-    registry: Annotated[ModelRegistry, Depends(get_model_registry)],
-    request: Request,
-) -> EmbeddingResponse:
+def _normalize_embedding_texts(req: EmbeddingRequest) -> list[str]:
     if req.encoding_format not in (None, "float"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -444,6 +439,37 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
                 detail=f"Input at index {idx} exceeds max length {max_text_chars} chars",
             )
 
+    return texts
+
+
+async def _build_embedding_usage(model: Any, texts: list[str]) -> Usage:
+    """Compute OpenAI-style usage for embeddings, optionally skipping token count."""
+
+    # High-QPS deployments can trade usage token accounting for lower latency by
+    # skipping a second tokenizer pass when EMBEDDING_USAGE_DISABLE_TOKEN_COUNT=1.
+    disable_usage_tokens = os.getenv("EMBEDDING_USAGE_DISABLE_TOKEN_COUNT", "0") != "0"
+    if disable_usage_tokens:
+        prompt_tokens = 0
+    else:
+        try:
+            loop = asyncio.get_running_loop()
+            prompt_tokens = await loop.run_in_executor(
+                get_embedding_count_executor(),
+                lambda: model.count_tokens(texts),
+            )
+        except Exception:
+            prompt_tokens = 0
+
+    return Usage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens, completion_tokens=None)
+
+
+@router.post("/v1/embeddings", response_model=EmbeddingResponse)
+async def create_embeddings(  # noqa: PLR0912, PLR0915
+    req: EmbeddingRequest,
+    registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+    request: Request,
+) -> EmbeddingResponse:
+    texts = _normalize_embedding_texts(req)
     start = time.perf_counter()
     embed_timeout = float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60"))
     cancel_event = threading.Event()
@@ -561,21 +587,7 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
     data = [
         EmbeddingObject(index=i, embedding=vec.tolist()) for i, vec in enumerate(vectors)
     ]
-    # High-QPS deployments can trade usage token accounting for lower latency by
-    # skipping a second tokenizer pass when EMBEDDING_USAGE_DISABLE_TOKEN_COUNT=1.
-    disable_usage_tokens = os.getenv("EMBEDDING_USAGE_DISABLE_TOKEN_COUNT", "0") != "0"
-    if disable_usage_tokens:
-        prompt_tokens = 0
-    else:
-        try:
-            loop = asyncio.get_running_loop()
-            prompt_tokens = await loop.run_in_executor(
-                get_embedding_count_executor(),
-                lambda: model.count_tokens(texts),
-            )
-        except Exception:
-            prompt_tokens = 0
-    usage = Usage(prompt_tokens=prompt_tokens, total_tokens=prompt_tokens, completion_tokens=None)
+    usage = await _build_embedding_usage(model, texts)
     return EmbeddingResponse(data=data, model=req.model, usage=usage)
 
 
@@ -604,28 +616,7 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
     label_token = set_queue_label(req.model or "chat")
     try:
         async with limiter():
-            try:
-                model = registry.get(req.model)
-            except KeyError as exc:
-                record_chat_request(req.model, "404")
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Model {req.model} not found",
-                ) from exc
-
-            capabilities = getattr(model, "capabilities", [])
-            if "chat-completion" not in capabilities:
-                record_chat_request(req.model, "400")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Model {req.model} does not support chat/completions",
-                )
-            if has_images and "vision" not in capabilities:
-                record_chat_request(req.model, "400")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Model {req.model} does not support image inputs",
-                )
+            model = _resolve_chat_model_and_caps(registry, req.model, has_images=has_images)
 
             defaults = getattr(model, "generation_defaults", {}) or {}
             max_tokens_default = defaults.get("max_tokens") or int(os.getenv("MAX_NEW_TOKENS", "512"))
@@ -856,6 +847,63 @@ async def create_chat_completions(  # noqa: PLR0915, PLR0912
 ALLOWED_AUDIO_RESPONSE_FORMATS = {"json", "text", "srt", "verbose_json", "vtt"}
 
 
+def _resolve_audio_model_and_caps(registry: ModelRegistry, model_name: str) -> Any:
+    """Lookup and validate an audio-capable model for Whisper-style endpoints."""
+
+    try:
+        model = registry.get(model_name)
+    except KeyError as exc:
+        record_audio_request(model_name, "404")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model_name} not found",
+        ) from exc
+
+    capabilities = getattr(model, "capabilities", [])
+    if "audio-transcription" not in capabilities:
+        record_audio_request(model_name, "400")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model {model_name} does not support audio transcription",
+        )
+
+    return model
+
+
+def _resolve_chat_model_and_caps(
+    registry: ModelRegistry,
+    model_name: str,
+    *,
+    has_images: bool,
+) -> Any:
+    """Lookup and validate a chat-capable model, including optional vision support."""
+
+    try:
+        model = registry.get(model_name)
+    except KeyError as exc:
+        record_chat_request(model_name, "404")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model_name} not found",
+        ) from exc
+
+    capabilities = getattr(model, "capabilities", [])
+    if "chat-completion" not in capabilities:
+        record_chat_request(model_name, "400")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model {model_name} does not support chat/completions",
+        )
+    if has_images and "vision" not in capabilities:
+        record_chat_request(model_name, "400")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model {model_name} does not support image inputs",
+        )
+
+    return model
+
+
 async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
     *,
     file: UploadFile,
@@ -895,19 +943,7 @@ async def _handle_audio_request(  # noqa: PLR0912, PLR0913, PLR0915
             executor = get_audio_executor()
             duration = await loop.run_in_executor(executor, lambda: _probe_duration(temp_path))
 
-            try:
-                model = registry.get(model_name)
-            except KeyError as exc:
-                record_audio_request(model_name, "404")
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model {model_name} not found") from exc
-
-            capabilities = getattr(model, "capabilities", [])
-            if "audio-transcription" not in capabilities:
-                record_audio_request(model_name, "400")
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Model {model_name} does not support audio transcription",
-                )
+            model = _resolve_audio_model_and_caps(registry, model_name)
 
             try:
                 work_task: asyncio.Future[Any] = asyncio.ensure_future(

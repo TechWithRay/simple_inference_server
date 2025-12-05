@@ -5,6 +5,7 @@ import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import huggingface_hub as hf
 import torch
@@ -106,83 +107,21 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:  # 
     state.batching_service = batching_service
     state.chat_batching_service = chat_batching_service
 
-    # Eagerly initialize shared executors so thread pools and their worker counts
-    # are fixed during startup and visible in the runtime configuration snapshot.
-    embedding_executor = get_embedding_executor()
-    embedding_count_executor = get_embedding_count_executor()
-    chat_executor = get_chat_executor()
-    vision_executor = get_vision_executor()
-    audio_executor = get_audio_executor()
-
-    runtime_cfg = {
-        "model_config": config_path,
-        "model_device": device_override or "auto",
-        "model_allowlist": model_allowlist,
-        "max_concurrent": limiter.MAX_CONCURRENT,
-        "max_queue_size": limiter.MAX_QUEUE_SIZE,
-        "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
-        "embedding_max_workers": getattr(embedding_executor, "_max_workers", EMBEDDING_MAX_WORKERS),
-        "embedding_count_max_workers": getattr(
-            embedding_count_executor,
-            "_max_workers",
-            None,
-        ),
-        "chat_max_workers": getattr(chat_executor, "_max_workers", CHAT_MAX_WORKERS),
-        "vision_max_workers": getattr(vision_executor, "_max_workers", VISION_MAX_WORKERS),
-        "audio_max_workers": getattr(audio_executor, "_max_workers", AUDIO_MAX_WORKERS),
-        "max_batch_size": int(os.getenv("MAX_BATCH_SIZE", "32")),
-        "max_text_chars": int(os.getenv("MAX_TEXT_CHARS", "20000")),
-        "enable_batching": batching_enabled,
-        "batch_window_ms": batch_window_ms,
-        "batch_max_size": batch_max_size,
-        "embedding_batch_queue_size": batch_queue_size,
-        "enable_chat_batching": chat_batching_enabled,
-        "chat_batch_window_ms": chat_batch_window_ms,
-        "chat_batch_max_size": chat_batch_max_size,
-        "chat_max_prompt_tokens": chat_max_prompt_tokens,
-        "chat_max_new_tokens": chat_max_new_tokens,
-        "chat_batch_queue_size": chat_batch_queue_size,
-        "chat_queue_max_wait_ms": float(os.getenv("CHAT_QUEUE_MAX_WAIT_MS", "2000")),
-        "chat_requeue_max_wait_ms": float(os.getenv("CHAT_REQUEUE_MAX_WAIT_MS", "2000")),
-        "chat_requeue_max_tasks": int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64")),
-        "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
-        "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
-        "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
-        "embedding_generate_timeout_sec": float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60")),
-        "audio_process_timeout_sec": float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180")),
-    }
-    # Log when audio concurrency/queue defaults are derived from global settings
-    # rather than explicit AUDIO_* overrides, for easier ops debugging.
-    if "AUDIO_MAX_CONCURRENT" not in os.environ and audio_limits.MAX_CONCURRENT == limiter.MAX_CONCURRENT:
-        logger.debug(
-            "audio_max_concurrent_derived_from_global",
-            extra={
-                "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
-                "max_concurrent": limiter.MAX_CONCURRENT,
-            },
-        )
-    if (
-        "AUDIO_MAX_QUEUE_SIZE" not in os.environ
-        and audio_limits.MAX_QUEUE_SIZE == limiter.MAX_QUEUE_SIZE
-    ):
-        logger.debug(
-            "audio_max_queue_size_derived_from_global",
-            extra={
-                "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
-                "max_queue_size": limiter.MAX_QUEUE_SIZE,
-            },
-        )
-    if (
-        "AUDIO_QUEUE_TIMEOUT_SEC" not in os.environ
-        and audio_limits.QUEUE_TIMEOUT_SEC == limiter.QUEUE_TIMEOUT_SEC
-    ):
-        logger.debug(
-            "audio_queue_timeout_sec_derived_from_global",
-            extra={
-                "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
-                "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
-            },
-        )
+    runtime_cfg = _build_runtime_config(
+        config_path=config_path,
+        device_override=device_override,
+        model_allowlist=model_allowlist,
+        batching_enabled=batching_enabled,
+        batch_window_ms=batch_window_ms,
+        batch_max_size=batch_max_size,
+        batch_queue_size=batch_queue_size,
+        chat_batching_enabled=chat_batching_enabled,
+        chat_batch_window_ms=chat_batch_window_ms,
+        chat_batch_max_size=chat_batch_max_size,
+        chat_max_prompt_tokens=chat_max_prompt_tokens,
+        chat_max_new_tokens=chat_max_new_tokens,
+        chat_batch_queue_size=chat_batch_queue_size,
+    )
     logger.info(
         "Loaded models",
         extra={
@@ -283,6 +222,106 @@ def _warn_thread_unsafe_models(registry: ModelRegistry) -> None:
                 "thread_unsafe_model_with_multiple_workers",
                 extra={"model": name, "capabilities": caps, "workers": workers},
             )
+
+
+def _build_runtime_config(
+    *,
+    config_path: str,
+    device_override: str | None,
+    model_allowlist: list[str] | None,
+    batching_enabled: bool,
+    batch_window_ms: float,
+    batch_max_size: int,
+    batch_queue_size: int,
+    chat_batching_enabled: bool,
+    chat_batch_window_ms: float,
+    chat_batch_max_size: int,
+    chat_max_prompt_tokens: int,
+    chat_max_new_tokens: int,
+    chat_batch_queue_size: int,
+) -> dict[str, Any]:
+    """Assemble a snapshot of the runtime configuration from environment and defaults."""
+
+    # Eagerly initialize shared executors so thread pools and their worker counts
+    # are fixed during startup and visible in the runtime configuration snapshot.
+    embedding_executor = get_embedding_executor()
+    embedding_count_executor = get_embedding_count_executor()
+    chat_executor = get_chat_executor()
+    vision_executor = get_vision_executor()
+    audio_executor = get_audio_executor()
+
+    runtime_cfg: dict[str, Any] = {
+        "model_config": config_path,
+        "model_device": device_override or "auto",
+        "model_allowlist": model_allowlist,
+        "max_concurrent": limiter.MAX_CONCURRENT,
+        "max_queue_size": limiter.MAX_QUEUE_SIZE,
+        "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
+        "embedding_max_workers": getattr(embedding_executor, "_max_workers", EMBEDDING_MAX_WORKERS),
+        "embedding_count_max_workers": getattr(
+            embedding_count_executor,
+            "_max_workers",
+            None,
+        ),
+        "chat_max_workers": getattr(chat_executor, "_max_workers", CHAT_MAX_WORKERS),
+        "vision_max_workers": getattr(vision_executor, "_max_workers", VISION_MAX_WORKERS),
+        "audio_max_workers": getattr(audio_executor, "_max_workers", AUDIO_MAX_WORKERS),
+        "max_batch_size": int(os.getenv("MAX_BATCH_SIZE", "32")),
+        "max_text_chars": int(os.getenv("MAX_TEXT_CHARS", "20000")),
+        "enable_batching": batching_enabled,
+        "batch_window_ms": batch_window_ms,
+        "batch_max_size": batch_max_size,
+        "embedding_batch_queue_size": batch_queue_size,
+        "enable_chat_batching": chat_batching_enabled,
+        "chat_batch_window_ms": chat_batch_window_ms,
+        "chat_batch_max_size": chat_batch_max_size,
+        "chat_max_prompt_tokens": chat_max_prompt_tokens,
+        "chat_max_new_tokens": chat_max_new_tokens,
+        "chat_batch_queue_size": chat_batch_queue_size,
+        "chat_queue_max_wait_ms": float(os.getenv("CHAT_QUEUE_MAX_WAIT_MS", "2000")),
+        "chat_requeue_max_wait_ms": float(os.getenv("CHAT_REQUEUE_MAX_WAIT_MS", "2000")),
+        "chat_requeue_max_tasks": int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64")),
+        "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
+        "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
+        "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
+        "embedding_generate_timeout_sec": float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60")),
+        "audio_process_timeout_sec": float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180")),
+    }
+
+    # Log when audio concurrency/queue defaults are derived from global settings
+    # rather than explicit AUDIO_* overrides, for easier ops debugging.
+    if "AUDIO_MAX_CONCURRENT" not in os.environ and audio_limits.MAX_CONCURRENT == limiter.MAX_CONCURRENT:
+        logger.debug(
+            "audio_max_concurrent_derived_from_global",
+            extra={
+                "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
+                "max_concurrent": limiter.MAX_CONCURRENT,
+            },
+        )
+    if (
+        "AUDIO_MAX_QUEUE_SIZE" not in os.environ
+        and audio_limits.MAX_QUEUE_SIZE == limiter.MAX_QUEUE_SIZE
+    ):
+        logger.debug(
+            "audio_max_queue_size_derived_from_global",
+            extra={
+                "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
+                "max_queue_size": limiter.MAX_QUEUE_SIZE,
+            },
+        )
+    if (
+        "AUDIO_QUEUE_TIMEOUT_SEC" not in os.environ
+        and audio_limits.QUEUE_TIMEOUT_SEC == limiter.QUEUE_TIMEOUT_SEC
+    ):
+        logger.debug(
+            "audio_queue_timeout_sec_derived_from_global",
+            extra={
+                "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
+                "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
+            },
+        )
+
+    return runtime_cfg
 
 
 def _validate_ffmpeg_for_audio(registry: ModelRegistry) -> None:

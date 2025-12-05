@@ -12,7 +12,7 @@ Phase 1 behavior (non-streaming, no abort)
 - Queue + scheduler: per-chat-model worker batches compatible requests (same decoding params) within `CHAT_BATCH_WINDOW_MS`, capped by `CHAT_BATCH_MAX_SIZE`. Only text-only chat models are opted in by default.
 - Execution: uses model `batched_generate` when available (TextChatModel) and falls back to per-request `generate` otherwise. Single worker per model keeps model usage thread-safe.
 - Limits: prompt length guard (`CHAT_MAX_PROMPT_TOKENS`) and `CHAT_MAX_NEW_TOKENS` ceiling reject oversize requests early to avoid OOM. CUDA OOM retries once after clearing cache; then falls back to sequential generation for that batch.
-- Compatibility: CPU/MPS/CUDA all supported; vision models stay on the legacy path unless `CHAT_BATCH_ALLOW_VISION=1`.
+- Compatibility: CPU/MPS/CUDA all supported; vision models stay on the non-batched path unless `CHAT_BATCH_ALLOW_VISION=1`.
 
 Phase 2 notes (future TODOs)
 - Streaming: push partial generations every `stream_interval` tokens to cut tail latency while sharing batches.
