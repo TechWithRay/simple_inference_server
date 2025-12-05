@@ -15,10 +15,6 @@ from app.monitoring.metrics import observe_embedding_batch_wait
 from app.threadpool import get_embedding_executor
 
 
-class EmbeddingBatchQueueFullError(Exception):
-    """Raised when the embedding batch queue is full."""
-
-
 class EmbeddingBatchQueueTimeoutError(Exception):
     """Raised when waiting to enqueue into the embedding batch queue times out."""
 
@@ -52,8 +48,6 @@ class ModelBatcher:
             await asyncio.wait_for(self.queue.put(_BatchItem(texts, fut, cancel_event)), timeout=self.queue_timeout)
         except TimeoutError as exc:
             raise EmbeddingBatchQueueTimeoutError("Embedding batch queue wait exceeded") from exc
-        except asyncio.QueueFull as exc:
-            raise EmbeddingBatchQueueFullError("Embedding batch queue is full") from exc
         return await fut
 
     async def _worker(self) -> None:  # noqa: PLR0912

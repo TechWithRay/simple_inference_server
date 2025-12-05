@@ -1,30 +1,9 @@
 # ruff: noqa: E402
-import sys
 import threading
 import time
-import types
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any, Literal, cast
-
-# Stub transformers to avoid heavyweight imports during test collection.
-transformers_stub = cast(Any, sys.modules.get("transformers") or types.ModuleType("transformers"))
-
-
-class _Dummy:  # pragma: no cover - stub
-    @staticmethod
-    def from_pretrained(*args: object, **kwargs: object) -> None:
-        return None
-
-
-def _pipeline(*args: object, **kwargs: object) -> None:  # pragma: no cover - stub
-    return None
-
-
-transformers_stub.WhisperForConditionalGeneration = getattr(transformers_stub, "WhisperForConditionalGeneration", _Dummy)
-transformers_stub.WhisperProcessor = getattr(transformers_stub, "WhisperProcessor", _Dummy)
-transformers_stub.pipeline = getattr(transformers_stub, "pipeline", _pipeline)
-sys.modules["transformers"] = transformers_stub
+from typing import Literal
 
 from app.models.base import SpeechResult
 from app.models.whisper import WhisperASR

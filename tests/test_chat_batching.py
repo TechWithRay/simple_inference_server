@@ -1,40 +1,9 @@
 import asyncio
-import sys
-import types
 from typing import Any
 
 import pytest
 from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
-
-if "torch" not in sys.modules:
-    torch_stub = types.ModuleType("torch")
-
-    class _DummyCuda:
-        OutOfMemoryError = type("CudaOOM", (Exception,), {})
-
-        @staticmethod
-        def is_available() -> bool:
-            return False
-
-        @staticmethod
-        def empty_cache() -> None:
-            return None
-
-    torch_stub.cuda = _DummyCuda()  # type: ignore[attr-defined]
-    torch_stub.OutOfMemoryError = type("TorchOOM", (Exception,), {})  # type: ignore[attr-defined]
-    sys.modules["torch"] = torch_stub
-
-if "torchaudio" not in sys.modules:
-    torchaudio_stub = types.ModuleType("torchaudio")
-
-    class _DummyInfo:
-        def __init__(self) -> None:
-            self.num_frames = 0
-            self.sample_rate = 0
-
-    torchaudio_stub.info = lambda _path: _DummyInfo()  # type: ignore[attr-defined]
-    sys.modules["torchaudio"] = torchaudio_stub
 
 from app import api
 from app.chat_batching import ChatBatcher, ChatBatchingService, ChatBatchQueueFullError

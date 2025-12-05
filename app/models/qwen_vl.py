@@ -63,17 +63,6 @@ class _StopOnCancel(StoppingCriteria):
         return self.event.is_set()
 
 
-class _StopOnCancelAny(StoppingCriteria):
-    """Stop batched generation when any cancellation event is set."""
-
-    def __init__(self, events: list[threading.Event]) -> None:
-        super().__init__()
-        self.events = events
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> bool:  # noqa: D401
-        return any(ev.is_set() for ev in self.events)
-
-
 class QwenVLChat(ChatModel):
     """Chat handler for Qwen3-VL models with OpenAI-compatible inputs."""
 
@@ -300,13 +289,14 @@ class QwenVLChat(ChatModel):
         add_generation_prompt: bool = True,
     ) -> tuple[dict[str, Any], int]:
         qwen_messages = self._to_qwen_messages(messages)
-        inputs = self.processor.apply_chat_template(
+        raw_inputs = self.processor.apply_chat_template(
             qwen_messages,
             tokenize=True,
             add_generation_prompt=add_generation_prompt,
             return_tensors="pt",
             return_dict=True,
         )
+        inputs = self._normalize_chat_template_output(raw_inputs)
         prompt_len = int(inputs["input_ids"].shape[1])
         inputs["_prompt_len"] = prompt_len
         return inputs, prompt_len
@@ -328,6 +318,45 @@ class QwenVLChat(ChatModel):
         if not criteria:
             return None, stopper
         return StoppingCriteriaList(criteria), stopper
+
+    def _normalize_chat_template_output(self, raw_inputs: Any) -> dict[str, torch.Tensor]:
+        """Normalize processor outputs to a plain dict of tensors.
+
+        Qwen's AutoProcessor may return a BatchEncoding, a plain dict, or a
+        namespace-like object. In addition, some fields can be non-tensor
+        metadata (e.g., original text) which must not be passed to
+        ``.to(device)`` in generate_prepared. This helper mirrors the
+        TextChatModel behavior but preserves higher-rank tensors (e.g.,
+        pixel_values for vision inputs) by avoiding any reshaping.
+        """
+
+        if isinstance(raw_inputs, dict):
+            source = raw_inputs
+        elif hasattr(raw_inputs, "data") and isinstance(getattr(raw_inputs, "data"), dict):
+            source = raw_inputs.data  # BatchEncoding-style
+        elif hasattr(raw_inputs, "input_ids"):
+            source = {
+                "input_ids": raw_inputs.input_ids,
+                "attention_mask": getattr(raw_inputs, "attention_mask", None),
+            }
+        else:
+            raise ValueError("Processor returned unexpected format for chat template")
+
+        normalized: dict[str, torch.Tensor] = {}
+        for key, value in source.items():
+            if value is None:
+                continue
+            if not torch.is_tensor(value):
+                logger.debug(
+                    "Dropping non-tensor chat template field %s (%s)", key, type(value).__name__
+                )
+                continue
+            normalized[key] = value
+
+        if "input_ids" not in normalized:
+            raise ValueError("Processor output missing 'input_ids' tensor")
+
+        return normalized
 
     def _to_qwen_messages(self, messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         qwen_messages: list[dict[str, Any]] = []

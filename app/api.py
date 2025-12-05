@@ -24,10 +24,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
-from app.batching import (
-    EmbeddingBatchQueueFullError,
-    EmbeddingBatchQueueTimeoutError,
-)
+from app.batching import EmbeddingBatchQueueTimeoutError
 from app.chat_batching import (
     ChatBatchQueueFullError,
     ChatBatchQueueTimeoutError,
@@ -527,11 +524,11 @@ async def create_embeddings(  # noqa: PLR0912, PLR0915
                     status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
                     detail="Client disconnected",
                 ) from exc
-            except (EmbeddingBatchQueueFullError, EmbeddingBatchQueueTimeoutError) as exc:
+            except EmbeddingBatchQueueTimeoutError as exc:
                 record_request(req.model, "429")
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Embedding batch queue wait exceeded" if isinstance(exc, EmbeddingBatchQueueTimeoutError) else "Embedding batch queue full",
+                    detail="Embedding batch queue wait exceeded",
                     headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
                 ) from exc
             except Exception as exc:  # pragma: no cover - unexpected runtime failure

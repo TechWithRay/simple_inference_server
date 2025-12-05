@@ -7,7 +7,7 @@ import os
 import tempfile
 import time
 import wave
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -224,34 +224,6 @@ def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupCon
         run_once=_run_once,
         step_extra={"batch_size": config.batch_size},
     )
-
-
-def _run_warmup_step(
-    model: EmbeddingModel,
-    texts: Iterable[str],
-    workers: int,
-    use_inference_mode: bool,
-    executor: ThreadPoolExecutor,
-) -> None:
-    context = _inference_context(enabled=use_inference_mode)
-    text_batch = list(texts)
-    if workers <= 1:
-        with context:
-            model.embed(text_batch)
-        return
-
-    futures = [
-        executor.submit(_embed_once, model, text_batch, use_inference_mode)
-        for _ in range(workers)
-    ]
-    wait(futures)
-    for fut in futures:
-        fut.result()
-
-
-def _embed_once(model: EmbeddingModel, texts: list[str], use_inference_mode: bool) -> None:
-    with _inference_context(enabled=use_inference_mode):
-        model.embed(texts)
 
 
 def _inference_context(enabled: bool) -> AbstractContextManager[None]:

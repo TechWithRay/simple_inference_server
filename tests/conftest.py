@@ -6,8 +6,12 @@ import contextlib
 import importlib.machinery
 import sys
 import types
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Generator, Iterator
+from typing import Any, cast
+
+import pytest
+
+from tests.mocks import FakeTensor, InferenceModeContext
 
 # Several tests (and third-party imports) look for torchaudio. Provide a minimal
 # stub with a ModuleSpec so importlib.util.find_spec works without the real
@@ -110,6 +114,9 @@ _transformers.AutoModelForCausalLM = _DummyModel
 _transformers.AutoProcessor = _DummyProcessor
 _transformers.StoppingCriteria = _StoppingCriteria
 _transformers.StoppingCriteriaList = _StoppingCriteriaList
+_transformers.WhisperForConditionalGeneration = _DummyModel
+_transformers.WhisperProcessor = _DummyProcessor
+_transformers.pipeline = lambda *args, **kwargs: None
 _transformers.__version__ = "0.0.0"
 
 sys.modules["transformers"] = _transformers
@@ -194,4 +201,61 @@ class _TestingModule(types.SimpleNamespace):  # pragma: no cover - stub type onl
 _numpy.testing = getattr(_numpy, "testing", _TestingModule())
 
 sys.modules["numpy"] = _numpy
+
+
+# --- Reusable Mocks ---------------------------------------------------------
+
+
+@pytest.fixture
+def mock_torch() -> Generator[None, None, None]:
+    """Patch the shared torch mock with FakeTensor logic for these tests."""
+    # Access the already-mocked torch module
+    torch_mock = cast(Any, sys.modules["torch"])
+
+    # Define helpers for the patch
+    def is_tensor(obj: Any) -> bool:
+        return isinstance(obj, FakeTensor)
+
+    def ones(shape: tuple[int, ...], **kwargs: Any) -> FakeTensor:
+        return FakeTensor(shape)
+
+    def arange(end: int, **kwargs: Any) -> FakeTensor:
+        return FakeTensor((end,))
+
+    def full(shape: tuple[int, ...], fill_value: Any, **kwargs: Any) -> FakeTensor:
+        return FakeTensor(shape)
+
+    def cat(tensors: list[FakeTensor], dim: int = 0) -> FakeTensor:
+        return tensors[0]
+
+    # Attributes to patch
+    attrs = {
+        "is_tensor": is_tensor,
+        "Tensor": FakeTensor,
+        "ones": ones,
+        "arange": arange,
+        "full": full,
+        "cat": cat,
+        "long": "long",
+        "inference_mode": lambda: InferenceModeContext(),
+    }
+
+    # Save original attributes
+    original_attrs = {}
+    for name in attrs:
+        if hasattr(torch_mock, name):
+            original_attrs[name] = getattr(torch_mock, name)
+
+    # Apply patches
+    for name, value in attrs.items():
+        setattr(torch_mock, name, value)
+
+    yield
+
+    # Restore attributes
+    for name in attrs:
+        if name in original_attrs:
+            setattr(torch_mock, name, original_attrs[name])
+        elif hasattr(torch_mock, name):
+            delattr(torch_mock, name)
 
