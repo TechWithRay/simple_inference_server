@@ -72,17 +72,27 @@ class ModelBatcher:
 
         return self._current_window
 
-    async def enqueue(self, texts: list[str], cancel_event: threading.Event | None = None) -> np.ndarray:
+    async def start(self) -> None:
+        """Explicitly start the worker task.
+
+        Called during startup to ensure the batcher is ready before
+        the first real request arrives.
+        """
         loop = asyncio.get_running_loop()
         if self._task is None:
-            # Lazily start worker on first request to bind to the running loop.
-            # Guarded by a per-instance lock so we do not accidentally spawn
-            # multiple workers under concurrent first use.
             if self._start_lock is None:
                 self._start_lock = asyncio.Lock()
             async with self._start_lock:
                 if self._task is None:
                     self._task = loop.create_task(self._worker())
+
+    async def enqueue(self, texts: list[str], cancel_event: threading.Event | None = None) -> np.ndarray:
+        loop = asyncio.get_running_loop()
+        if self._task is None:
+            # Lazily start worker on first request to bind to the running loop.
+            # Guarded by a per-instance lock so we do not accidentally spawn
+            # multiple workers being spawned under concurrent first use.
+            await self.start()
 
         fut: asyncio.Future[np.ndarray] = loop.create_future()
         try:
@@ -287,6 +297,17 @@ class BatchingService:
                     self.queue_size,
                     self.queue_timeout_sec,
                 )
+
+    async def start(self) -> None:
+        """Start all batcher workers.
+
+        Called during startup to ensure batchers are ready before
+        the first real request arrives.
+        """
+        if not self.enabled:
+            return
+        for batcher in self._batchers.values():
+            await batcher.start()
 
     async def enqueue(self, model_name: str, texts: list[str], cancel_event: threading.Event | None = None) -> np.ndarray:
         if not self.enabled:

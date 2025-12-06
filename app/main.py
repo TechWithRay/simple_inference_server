@@ -369,6 +369,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.warmup_status = state.warmup_status
         app.state.runtime_config = state.runtime_config
         setup_metrics(app)
+
+        # Start batcher workers before accepting requests.
+        # This ensures the async worker tasks are running and ready,
+        # avoiding lazy initialization latency on the first request.
+        if batching_service is not None:
+            await batching_service.start()
+            logger.info("embedding_batchers_started")
+        if chat_batching_service is not None:
+            await chat_batching_service.start()
+            logger.info("chat_batchers_started")
+
         yield
     finally:
         await shutdown(batching_service, chat_batching_service, registry)

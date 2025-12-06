@@ -132,6 +132,23 @@ class ChatBatcher:
 
         return self._current_window
 
+    async def start(self) -> None:
+        """Explicitly start the worker task.
+
+        Called during startup to ensure the batcher is ready before
+        the first real request arrives.
+        """
+        loop = asyncio.get_running_loop()
+        if self._task is None:
+            if self._start_lock is None:
+                self._start_lock = asyncio.Lock()
+            async with self._start_lock:
+                if self._task is None:
+                    self._task = loop.create_task(
+                        self._worker(),
+                        name=f"chat-batcher-{getattr(self.model, 'name', 'model')}",
+                    )
+
     async def enqueue(  # noqa: PLR0913 - explicit params keep batching contract clear
         self,
         messages: Sequence[dict[str, Any]],
@@ -169,16 +186,7 @@ class ChatBatcher:
             raise ValueError(f"Prompt too long; max {self.max_prompt_tokens} tokens")
 
         if self._task is None:
-            # Guard worker creation with a per-instance lock so concurrent first
-            # use does not accidentally start multiple batcher workers.
-            if self._start_lock is None:
-                self._start_lock = asyncio.Lock()
-            async with self._start_lock:
-                if self._task is None:
-                    self._task = loop.create_task(
-                        self._worker(),
-                        name=f"chat-batcher-{getattr(self.model, 'name', 'model')}",
-                    )
+            await self.start()
 
         fut: asyncio.Future[Any] = loop.create_future()
         item = _ChatBatchItem(
@@ -695,6 +703,17 @@ class ChatBatchingService:
 
     def is_supported(self, model_name: str) -> bool:
         return self.enabled and model_name in self._batchers
+
+    async def start(self) -> None:
+        """Start all batcher workers.
+
+        Called during startup to ensure batchers are ready before
+        the first real request arrives.
+        """
+        if not self.enabled:
+            return
+        for batcher in self._batchers.values():
+            await batcher.start()
 
     async def enqueue(  # noqa: PLR0913 - API mirrors model.generate parameters
         self,
