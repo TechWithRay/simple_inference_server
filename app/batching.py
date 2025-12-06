@@ -185,6 +185,12 @@ class _AggregateCancel:
 
         Uses a shared notification event for efficient blocking instead of polling.
         Monitor threads are spawned lazily and run as daemons.
+
+        Note: Monitor threads exit after their source event fires. This means
+        wait() works correctly for the first signal on each source event, but
+        if sources are cleared and re-set, monitors won't detect subsequent
+        signals. This is acceptable for the batching use case where
+        _AggregateCancel instances are short-lived and events are one-shot.
         """
         if not self._events:
             return False
@@ -200,6 +206,10 @@ class _AggregateCancel:
         # Multiple events: use monitor threads with a shared notify event
         if self._notify is None:
             self._notify = threading.Event()
+
+        # Clear notify before waiting to handle repeated wait() calls correctly.
+        # If a source was set between clear and wait, the monitor will re-set notify.
+        self._notify.clear()
 
         if not self._monitors_started:
             self._monitors_started = True
