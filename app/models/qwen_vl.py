@@ -16,13 +16,15 @@ from typing import Any
 import httpx
 import torch
 from PIL import Image
-from transformers import AutoProcessor, StoppingCriteria, StoppingCriteriaList
+from transformers import AutoProcessor, StoppingCriteriaList
 
+from app.config import settings
 from app.models.base import ChatGeneration, ChatModel
 from app.models.generation_utils import (
-    StopOnCancel,
     StopOnTokens,
+    build_stop_criteria,
     handle_oom,
+    normalize_chat_template_output,
     resolve_runtime_device,
     trim_with_stop,
 )
@@ -308,58 +310,19 @@ class QwenVLChat(ChatModel):
     def _build_stop_criteria(
         self, stop: list[str] | None, cancel_event: threading.Event | None
     ) -> tuple[StoppingCriteriaList | None, StopOnTokens | None]:
-        criteria: list[StoppingCriteria] = []
-        stopper = None
-        if stop:
-            stop_token_ids = [
-                self.processor.tokenizer.encode(s, add_special_tokens=False) for s in stop if s
-            ]
-            stopper = StopOnTokens(stop_token_ids)
-            criteria.append(stopper)
-        if cancel_event is not None:
-            criteria.append(StopOnCancel(cancel_event))
-        if not criteria:
-            return None, stopper
-        return StoppingCriteriaList(criteria), stopper
+        stop_token_ids = [
+            self.processor.tokenizer.encode(s, add_special_tokens=False) for s in (stop or []) if s
+        ]
+        return build_stop_criteria(stop_token_ids, cancel_event)
 
     def _normalize_chat_template_output(self, raw_inputs: Any) -> dict[str, torch.Tensor]:
         """Normalize processor outputs to a plain dict of tensors.
 
         Qwen's AutoProcessor may return a BatchEncoding, a plain dict, or a
-        namespace-like object. In addition, some fields can be non-tensor
-        metadata (e.g., original text) which must not be passed to
-        ``.to(device)`` in generate_prepared. This helper mirrors the
-        TextChatModel behavior but preserves higher-rank tensors (e.g.,
-        pixel_values for vision inputs) by avoiding any reshaping.
+        namespace-like object. This helper preserves higher-rank tensors (e.g.,
+        pixel_values for vision inputs) by not ensuring 2D.
         """
-
-        if isinstance(raw_inputs, dict):
-            source = raw_inputs
-        elif hasattr(raw_inputs, "data") and isinstance(raw_inputs.data, dict):
-            source = raw_inputs.data  # BatchEncoding-style
-        elif hasattr(raw_inputs, "input_ids"):
-            source = {
-                "input_ids": raw_inputs.input_ids,
-                "attention_mask": getattr(raw_inputs, "attention_mask", None),
-            }
-        else:
-            raise ValueError("Processor returned unexpected format for chat template")
-
-        normalized: dict[str, torch.Tensor] = {}
-        for key, value in source.items():
-            if value is None:
-                continue
-            if not torch.is_tensor(value):
-                logger.debug(
-                    "Dropping non-tensor chat template field %s (%s)", key, type(value).__name__
-                )
-                continue
-            normalized[key] = value
-
-        if "input_ids" not in normalized:
-            raise ValueError("Processor output missing 'input_ids' tensor")
-
-        return normalized
+        return normalize_chat_template_output(raw_inputs, ensure_2d=False, drop_non_tensor=True)
 
     def _to_qwen_messages(self, messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         qwen_messages: list[dict[str, Any]] = []
@@ -401,11 +364,11 @@ class QwenVLChat(ChatModel):
         blocking executor threads.
         """
 
-        max_bytes = int(os.getenv("MAX_REMOTE_IMAGE_BYTES", str(5 * 1024 * 1024)))
-        remote_timeout = float(os.getenv("REMOTE_IMAGE_TIMEOUT", "5"))
-        allow_remote = os.getenv("ALLOW_REMOTE_IMAGES", "0") != "0"
-        host_allowlist = {h.strip() for h in os.getenv("REMOTE_IMAGE_HOST_ALLOWLIST", "").split(",") if h.strip()}
-        mime_allowlist = {m.strip().lower() for m in os.getenv("REMOTE_IMAGE_MIME_ALLOWLIST", "image/png,image/jpeg,image/webp,image/gif").split(",") if m.strip()}
+        max_bytes = settings.max_remote_image_bytes
+        remote_timeout = settings.remote_image_timeout
+        allow_remote = settings.allow_remote_images
+        host_allowlist = settings.remote_image_host_allowlist_set
+        mime_allowlist = settings.remote_image_mime_allowlist_set
 
         if source.startswith("data:"):
             try:

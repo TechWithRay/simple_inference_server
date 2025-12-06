@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from app.concurrency import limiter
+from app.config import get_settings
 
 
 async def _use_limiter(limiter_module: Any, delay: float = 0.05) -> None:
@@ -19,6 +20,8 @@ def test_queue_full(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EMBEDDING_MAX_QUEUE_SIZE", "2")
     monkeypatch.setenv("EMBEDDING_QUEUE_TIMEOUT_SEC", "0.2")
 
+    # Clear settings cache so new env vars take effect
+    get_settings.cache_clear()
     importlib.reload(limiter)
 
     async def scenario() -> None:

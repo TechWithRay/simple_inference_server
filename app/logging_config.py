@@ -1,8 +1,9 @@
 import json
 import logging
-import os
 import sys
 from typing import Any
+
+from app.config import settings
 
 
 class JsonFormatter(logging.Formatter):
@@ -49,7 +50,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = settings.log_level.upper()
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     # Force our JSON handler even if uvicorn already configured handlers.

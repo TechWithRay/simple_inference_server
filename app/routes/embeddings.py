@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import logging
 import threading
 import time
 from typing import Annotated, Any
@@ -20,6 +20,7 @@ from app.concurrency.limiter import (
     reset_queue_label,
     set_queue_label,
 )
+from app.config import settings
 from app.dependencies import get_model_registry
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import observe_latency, record_request
@@ -31,6 +32,7 @@ from app.routes.common import (
 )
 from app.threadpool import get_embedding_count_executor, get_embedding_executor
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -68,14 +70,14 @@ def _normalize_embedding_texts(req: EmbeddingRequest) -> list[str]:
         )
 
     texts = [req.input] if isinstance(req.input, str) else list(req.input)
-    max_batch = int(os.getenv("MAX_BATCH_SIZE", "32"))
+    max_batch = settings.max_batch_size
     if len(texts) > max_batch:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Batch too large; max {max_batch} items",
         )
 
-    max_text_chars = int(os.getenv("MAX_TEXT_CHARS", "20000"))
+    max_text_chars = settings.max_text_chars
     for idx, t in enumerate(texts):
         if len(t) > max_text_chars:
             raise HTTPException(
@@ -87,8 +89,7 @@ def _normalize_embedding_texts(req: EmbeddingRequest) -> list[str]:
 
 
 async def _build_embedding_usage(model: Any, texts: list[str]) -> Usage:
-    disable_usage_tokens = os.getenv("EMBEDDING_USAGE_DISABLE_TOKEN_COUNT", "0") != "0"
-    if disable_usage_tokens:
+    if settings.embedding_usage_disable_token_count:
         prompt_tokens = 0
     else:
         try:
@@ -172,7 +173,7 @@ async def _run_embedding_generation(  # noqa: PLR0913 - explicit kwargs for clar
         ) from exc
     except Exception as exc:  # pragma: no cover - unexpected runtime failure
         record_request(model_name, "500")
-        __import__("logging").getLogger(__name__).exception(
+        logger.exception(
             "embedding_failed",
             extra={
                 "model": model_name,
@@ -196,7 +197,7 @@ async def create_embeddings(  # noqa: PLR0912
 ) -> EmbeddingResponse:
     texts = _normalize_embedding_texts(req)
     start = time.perf_counter()
-    embed_timeout = float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60"))
+    embed_timeout = settings.embedding_generate_timeout_sec
     cancel_event = threading.Event()
     label_token = set_queue_label(req.model or "embedding")
     limiter_cm = _get_embedding_limiter()
@@ -237,7 +238,7 @@ async def create_embeddings(  # noqa: PLR0912
     latency = time.perf_counter() - start
     observe_latency(req.model, latency)
     record_request(req.model, "200")
-    __import__("logging").getLogger(__name__).info(
+    logger.info(
         "embedding_request",
         extra={
             "model": req.model,

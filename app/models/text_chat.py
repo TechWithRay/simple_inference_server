@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 import torch
 from transformers import (
@@ -17,10 +17,11 @@ from transformers import (
 
 from app.models.base import ChatGeneration, ChatModel
 from app.models.generation_utils import (
-    StopOnCancel,
     StopOnCancelAny,
     StopOnTokens,
+    build_stop_criteria,
     handle_oom,
+    normalize_chat_template_output,
     resolve_runtime_device,
     trim_with_stop,
 )
@@ -293,21 +294,7 @@ class TextChatModel(ChatModel):
 
     def _normalize_chat_template_output(self, raw_inputs: Any) -> dict[str, torch.Tensor]:
         """Handle tokenizer outputs that may be dict, BatchEncoding, or tuple/list."""
-
-        if isinstance(raw_inputs, dict):
-            return self._ensure_2d(raw_inputs)
-        # BatchEncoding behaves like dict for .items()
-        if hasattr(raw_inputs, "data") and isinstance(raw_inputs.data, dict):
-            return self._ensure_2d(cast(dict[str, torch.Tensor], raw_inputs.data))
-        if hasattr(raw_inputs, "input_ids"):
-            # Some tokenizers may return namespace-like objects
-            return self._ensure_2d(
-                {
-                    "input_ids": raw_inputs.input_ids,
-                    "attention_mask": getattr(raw_inputs, "attention_mask", None),
-                }
-            )
-        raise ValueError("Tokenizer returned unexpected format for chat template")
+        return normalize_chat_template_output(raw_inputs, ensure_2d=True, drop_non_tensor=True)
 
     def _move_to_device(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Move tensors to the model device, using pinned memory + non_blocking when on CUDA."""
@@ -331,23 +318,6 @@ class TextChatModel(ChatModel):
     def _can_pin_memory(self) -> bool:
         device = getattr(self.model, "device", None)
         return bool(torch.cuda.is_available() and device is not None and str(device).startswith("cuda"))
-
-    @staticmethod
-    def _ensure_2d(inputs: dict[str, torch.Tensor | None]) -> dict[str, torch.Tensor]:
-        """Guarantee input_ids/attention_mask are 2D as expected by generate()."""
-
-        fixed: dict[str, torch.Tensor] = {}
-        for key, tensor in inputs.items():
-            if tensor is None:
-                continue
-            if not torch.is_tensor(tensor):
-                raise ValueError(f"{key} is not a tensor")
-            if tensor.dim() == 1:
-                tensor = tensor.unsqueeze(0)
-            elif tensor.dim() > 2:
-                tensor = tensor.view(tensor.shape[0], -1)
-            fixed[key] = tensor
-        return fixed
 
     def count_tokens(
         self, messages: Sequence[dict[str, Any]], *, add_generation_prompt: bool = True
@@ -387,17 +357,10 @@ class TextChatModel(ChatModel):
     def _build_stop_criteria(
         self, stop: list[str] | None, cancel_event: threading.Event | None
     ) -> tuple[StoppingCriteriaList | None, StopOnTokens | None]:
-        criteria: list[StoppingCriteria] = []
-        stopper = None
-        if stop:
-            stop_token_ids = [self.tokenizer.encode(s, add_special_tokens=False) for s in stop if s]
-            stopper = StopOnTokens(stop_token_ids)
-            criteria.append(stopper)
-        if cancel_event is not None:
-            criteria.append(StopOnCancel(cancel_event))
-        if not criteria:
-            return None, stopper
-        return StoppingCriteriaList(criteria), stopper
+        stop_token_ids = [
+            self.tokenizer.encode(s, add_special_tokens=False) for s in (stop or []) if s
+        ]
+        return build_stop_criteria(stop_token_ids, cancel_event)
 
     def _resolve_device_map(self, device_pref: str) -> str | None:
         if device_pref != "auto":

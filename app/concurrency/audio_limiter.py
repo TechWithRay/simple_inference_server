@@ -1,10 +1,10 @@
 import asyncio
 import contextlib
 import contextvars
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from app.config import settings
 from app.monitoring.metrics import AUDIO_GENERIC_LABEL_WARN, observe_audio_queue_wait, record_queue_rejection
 
 
@@ -20,12 +20,9 @@ class AudioShuttingDownError(Exception):
     """Raised when service is draining and not accepting new audio work."""
 
 
-_MAX_CONCURRENT_DEFAULT = os.getenv("MAX_CONCURRENT", "4")
-MAX_CONCURRENT = int(os.getenv("AUDIO_MAX_CONCURRENT", _MAX_CONCURRENT_DEFAULT))
-_MAX_QUEUE_DEFAULT = os.getenv("MAX_QUEUE_SIZE", "64")
-MAX_QUEUE_SIZE = int(os.getenv("AUDIO_MAX_QUEUE_SIZE", _MAX_QUEUE_DEFAULT))
-_TIMEOUT_DEFAULT = os.getenv("QUEUE_TIMEOUT_SEC", "2.0")
-QUEUE_TIMEOUT_SEC = float(os.getenv("AUDIO_QUEUE_TIMEOUT_SEC", _TIMEOUT_DEFAULT))
+MAX_CONCURRENT = settings.effective_audio_max_concurrent
+MAX_QUEUE_SIZE = settings.effective_audio_max_queue_size
+QUEUE_TIMEOUT_SEC = settings.effective_audio_queue_timeout_sec
 
 _semaphore: asyncio.Semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 _queue: asyncio.Queue[int] = asyncio.Queue(MAX_QUEUE_SIZE)

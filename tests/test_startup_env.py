@@ -7,6 +7,7 @@ from typing import Literal, cast
 import pytest
 
 from app import main
+from app.config import get_settings
 from app.models.base import SpeechModel, SpeechResult
 from app.models.registry import ModelRegistry
 
@@ -14,6 +15,7 @@ from app.models.registry import ModelRegistry
 def test_startup_requires_models_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Ensure model env is absent
     monkeypatch.delenv("MODELS", raising=False)
+    get_settings.cache_clear()
 
     with pytest.raises(SystemExit):
         main.startup()
@@ -39,6 +41,7 @@ models:
     monkeypatch.setenv("MODEL_CONFIG", str(cfg))
     monkeypatch.setenv("MODELS", "repo/a")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "models"))
+    get_settings.cache_clear()
     monkeypatch.setattr(main, "snapshot_download", DummyHub.snapshot_download)
 
     # Use private helper directly to avoid full startup side effects.
@@ -58,6 +61,7 @@ models:
     )
     monkeypatch.setenv("AUTO_DOWNLOAD_MODELS", "0")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "models"))
+    get_settings.cache_clear()
 
     called: list[str] = []
 
@@ -80,6 +84,7 @@ models:
     )
     monkeypatch.setenv("AUTO_DOWNLOAD_MODELS", "1")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "models"))
+    get_settings.cache_clear()
 
     called: list[str] = []
 

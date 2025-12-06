@@ -3,12 +3,15 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers import StoppingCriteria
+from transformers import StoppingCriteria, StoppingCriteriaList
 
 from app.utils.device import resolve_device
+
+if TYPE_CHECKING:
+    pass  # For future type-only imports
 
 logger = logging.getLogger(__name__)
 
@@ -119,5 +122,100 @@ def trim_with_stop(text: str, stop: list[str] | None) -> tuple[str, bool]:
         return text, False
 
     return text[:earliest_idx].rstrip(), True
+
+
+def build_stop_criteria(
+    stop_token_ids: list[list[int]],
+    cancel_event: threading.Event | None,
+) -> tuple[StoppingCriteriaList | None, StopOnTokens | None]:
+    """Build stopping criteria from stop token IDs and an optional cancel event.
+
+    This is a shared helper used by both text and vision chat models.
+
+    Args:
+        stop_token_ids: List of token ID sequences to stop on
+        cancel_event: Optional threading event to check for cancellation
+
+    Returns:
+        Tuple of (StoppingCriteriaList or None, StopOnTokens stopper or None)
+    """
+    criteria: list[StoppingCriteria] = []
+    stopper: StopOnTokens | None = None
+
+    if stop_token_ids:
+        stopper = StopOnTokens(stop_token_ids)
+        criteria.append(stopper)
+
+    if cancel_event is not None:
+        criteria.append(StopOnCancel(cancel_event))
+
+    if not criteria:
+        return None, stopper
+
+    return StoppingCriteriaList(criteria), stopper
+
+
+def normalize_chat_template_output(
+    raw_inputs: Any,
+    *,
+    ensure_2d: bool = False,
+    drop_non_tensor: bool = True,
+) -> dict[str, torch.Tensor]:
+    """Normalize tokenizer/processor outputs to a plain dict of tensors.
+
+    Handles various output formats from tokenizers/processors:
+    - Plain dict
+    - BatchEncoding (has .data attribute)
+    - Namespace-like objects (has .input_ids attribute)
+
+    Args:
+        raw_inputs: Output from tokenizer/processor apply_chat_template
+        ensure_2d: If True, ensure input_ids/attention_mask are 2D
+        drop_non_tensor: If True, drop non-tensor fields
+
+    Returns:
+        Dict of tensor values ready for model input
+    """
+    # Extract the source dict from various formats
+    if isinstance(raw_inputs, dict):
+        source = raw_inputs
+    elif hasattr(raw_inputs, "data") and isinstance(raw_inputs.data, dict):
+        # BatchEncoding-style
+        source = raw_inputs.data
+    elif hasattr(raw_inputs, "input_ids"):
+        # Namespace-like objects
+        source = {
+            "input_ids": raw_inputs.input_ids,
+            "attention_mask": getattr(raw_inputs, "attention_mask", None),
+        }
+    else:
+        raise ValueError("Tokenizer/processor returned unexpected format for chat template")
+
+    normalized: dict[str, torch.Tensor] = {}
+    for key, value in source.items():
+        if value is None:
+            continue
+
+        if not torch.is_tensor(value):
+            if drop_non_tensor:
+                logger.debug(
+                    "Dropping non-tensor chat template field %s (%s)", key, type(value).__name__
+                )
+                continue
+            raise ValueError(f"Field {key} is not a tensor")
+
+        tensor = value
+        if ensure_2d:
+            if tensor.dim() == 1:
+                tensor = tensor.unsqueeze(0)
+            elif tensor.dim() > 2:
+                tensor = tensor.view(tensor.shape[0], -1)
+
+        normalized[key] = tensor
+
+    if "input_ids" not in normalized:
+        raise ValueError("Output missing 'input_ids' tensor")
+
+    return normalized
 
 

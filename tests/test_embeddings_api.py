@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import api
 from app.concurrency.limiter import QueueFullError
+from app.config import get_settings
 from app.dependencies import get_model_registry
 
 HTTP_OK = 200
@@ -99,6 +100,7 @@ def test_queue_full_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_batch_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_BATCH_SIZE", "1")
+    get_settings.cache_clear()  # Ensure new env var takes effect
     client = TestClient(create_app())
     resp = client.post("/v1/embeddings", json={"model": "dummy", "input": ["a", "b"]})
     assert resp.status_code == HTTP_BAD_REQUEST
@@ -106,6 +108,7 @@ def test_batch_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_text_too_long(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_TEXT_CHARS", "5")
+    get_settings.cache_clear()  # Ensure new env var takes effect
     client = TestClient(create_app())
     resp = client.post("/v1/embeddings", json={"model": "dummy", "input": "123456"})
     assert resp.status_code == HTTP_BAD_REQUEST

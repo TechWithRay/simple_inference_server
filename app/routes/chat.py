@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import threading
 import time
 from collections.abc import Sequence
@@ -24,6 +23,7 @@ from app.concurrency.limiter import (
     reset_queue_label,
     set_queue_label,
 )
+from app.config import settings
 from app.dependencies import get_model_registry
 from app.models.base import ChatGeneration
 from app.models.registry import ModelRegistry
@@ -131,7 +131,7 @@ def _resolve_generation_params(
     model: Any,
 ) -> tuple[int, float, float]:
     defaults = getattr(model, "generation_defaults", {}) or {}
-    max_tokens_default = defaults.get("max_tokens") or int(os.getenv("MAX_NEW_TOKENS", "512"))
+    max_tokens_default = defaults.get("max_tokens") or settings.max_new_tokens
     temperature_default = defaults.get("temperature", 0.7)
     top_p_default = defaults.get("top_p", 0.9)
 
@@ -167,9 +167,9 @@ async def _prepare_chat_request(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, int]:
     loop = asyncio.get_running_loop()
-    prepare_timeout = float(os.getenv("CHAT_PREPARE_TIMEOUT_SEC", "10"))
+    prepare_timeout = settings.chat_prepare_timeout_sec
     count_executor = get_count_executor(
-        use_chat_executor=os.getenv("CHAT_COUNT_USE_CHAT_EXECUTOR", "0") != "0"
+        use_chat_executor=settings.chat_count_use_chat_executor
     )
     if hasattr(model, "prepare_inputs"):
         try:
@@ -214,7 +214,7 @@ async def _run_chat_generation(  # noqa: PLR0915
 
     loop = asyncio.get_running_loop()
     executor = get_chat_executor()
-    max_prompt_tokens = int(os.getenv("CHAT_MAX_PROMPT_TOKENS", "4096"))
+    max_prompt_tokens = settings.chat_max_prompt_tokens
     prepared_inputs, prompt_tokens = await _prepare_chat_request(model, raw_messages)
     if prompt_tokens > max_prompt_tokens:
         record_chat_request(req.model, "400")
@@ -223,7 +223,7 @@ async def _run_chat_generation(  # noqa: PLR0915
             detail=f"Prompt too long; max {max_prompt_tokens} tokens",
         )
     cancel_event = threading.Event()
-    gen_timeout = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
+    gen_timeout = settings.chat_generate_timeout_sec
     generate_accepts_cancel = "cancel_event" in inspect.signature(model.generate).parameters
     generate_prepared_accepts_cancel = hasattr(model, "generate_prepared") and "cancel_event" in inspect.signature(model.generate_prepared).parameters
     batcher = getattr(request.app.state, "chat_batching_service", None)

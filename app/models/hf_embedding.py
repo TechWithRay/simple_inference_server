@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+from app.config import settings
 from app.embedding_cache import EmbeddingCache, embed_with_cache
 from app.models.base import EmbeddingModel
 
@@ -27,8 +28,7 @@ class HFEmbeddingModel(EmbeddingModel):
         models_dir = Path(__file__).resolve().parent.parent.parent / "models"
         self.cache_dir = str(models_dir) if models_dir.exists() else os.environ.get("HF_HOME")
 
-        cache_size = int(os.getenv("EMBEDDING_CACHE_SIZE", "256"))
-        self._cache = EmbeddingCache(max_size=max(cache_size, 0))
+        self._cache = EmbeddingCache(max_size=max(settings.embedding_cache_size, 0))
 
         # Warm a tokenizer for the creating thread; other threads lazily init their own.
         self._tokenizer_local.tokenizer = AutoTokenizer.from_pretrained(

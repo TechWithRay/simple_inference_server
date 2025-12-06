@@ -1,10 +1,10 @@
 import asyncio
 import contextlib
 import contextvars
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from app.config import settings
 from app.monitoring.metrics import GENERIC_LABEL_WARN, observe_queue_wait, record_queue_rejection
 
 
@@ -21,18 +21,18 @@ class ShuttingDownError(Exception):
 
 
 # Global defaults
-MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "4"))
-MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "64"))
-QUEUE_TIMEOUT_SEC = float(os.getenv("QUEUE_TIMEOUT_SEC", "2.0"))
+MAX_CONCURRENT = settings.max_concurrent
+MAX_QUEUE_SIZE = settings.max_queue_size
+QUEUE_TIMEOUT_SEC = settings.queue_timeout_sec
 
 # Per-capability settings (fall back to global if not set)
-EMBEDDING_MAX_CONCURRENT = int(os.getenv("EMBEDDING_MAX_CONCURRENT", str(MAX_CONCURRENT)))
-EMBEDDING_MAX_QUEUE_SIZE = int(os.getenv("EMBEDDING_MAX_QUEUE_SIZE", str(MAX_QUEUE_SIZE)))
-EMBEDDING_QUEUE_TIMEOUT_SEC = float(os.getenv("EMBEDDING_QUEUE_TIMEOUT_SEC", str(QUEUE_TIMEOUT_SEC)))
+EMBEDDING_MAX_CONCURRENT = settings.effective_embedding_max_concurrent
+EMBEDDING_MAX_QUEUE_SIZE = settings.effective_embedding_max_queue_size
+EMBEDDING_QUEUE_TIMEOUT_SEC = settings.effective_embedding_queue_timeout_sec
 
-CHAT_MAX_CONCURRENT = int(os.getenv("CHAT_MAX_CONCURRENT", str(MAX_CONCURRENT)))
-CHAT_MAX_QUEUE_SIZE = int(os.getenv("CHAT_MAX_QUEUE_SIZE", str(MAX_QUEUE_SIZE)))
-CHAT_QUEUE_TIMEOUT_SEC = float(os.getenv("CHAT_QUEUE_TIMEOUT_SEC", str(QUEUE_TIMEOUT_SEC)))
+CHAT_MAX_CONCURRENT = settings.effective_chat_max_concurrent
+CHAT_MAX_QUEUE_SIZE = settings.effective_chat_max_queue_size
+CHAT_QUEUE_TIMEOUT_SEC = settings.effective_chat_queue_timeout_sec
 
 # Shared state for shutdown coordination
 _state = {"accepting": True}

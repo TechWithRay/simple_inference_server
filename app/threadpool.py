@@ -1,40 +1,51 @@
 from __future__ import annotations
 
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import TypedDict
 
-# Allow per-capability sizing; defaults are decoupled from the global limiter but still bounded >=1.
-EMBEDDING_MAX_WORKERS = max(1, int(os.getenv("EMBEDDING_MAX_WORKERS", "4")))
-CHAT_MAX_WORKERS = max(1, int(os.getenv("CHAT_MAX_WORKERS", "4")))
-VISION_MAX_WORKERS = max(1, int(os.getenv("VISION_MAX_WORKERS", "2")))
-AUDIO_MAX_WORKERS = max(
-    1,
-    int(os.getenv("AUDIO_MAX_WORKERS", os.getenv("AUDIO_MAX_CONCURRENT", "1"))),
-)
-EMBEDDING_COUNT_MAX_WORKERS = max(1, int(os.getenv("EMBEDDING_COUNT_MAX_WORKERS", "2")))
+from app.config import settings
+
+
+class _ExecutorState(TypedDict):
+    """Type definition for executor state including both executor and max_workers."""
+
+    executor: ThreadPoolExecutor | None
+    max_workers: int
+
 
 _state_lock = threading.Lock()
-_state: dict[str, ThreadPoolExecutor | None] = {
-    "embedding_executor": None,
-    "embedding_count_executor": None,
-    "chat_executor": None,
-    "vision_executor": None,
-    "audio_executor": None,
+_state: dict[str, _ExecutorState] = {
+    "embedding": {"executor": None, "max_workers": max(1, settings.embedding_max_workers)},
+    "embedding_count": {"executor": None, "max_workers": max(1, settings.embedding_count_max_workers)},
+    "chat": {"executor": None, "max_workers": max(1, settings.chat_max_workers)},
+    "vision": {"executor": None, "max_workers": max(1, settings.vision_max_workers)},
+    "audio": {"executor": None, "max_workers": max(1, settings.audio_max_workers)},
 }
 
+# Module-level constants for backward compatibility with external code
+EMBEDDING_MAX_WORKERS = _state["embedding"]["max_workers"]
+CHAT_MAX_WORKERS = _state["chat"]["max_workers"]
+VISION_MAX_WORKERS = _state["vision"]["max_workers"]
+AUDIO_MAX_WORKERS = _state["audio"]["max_workers"]
+EMBEDDING_COUNT_MAX_WORKERS = _state["embedding_count"]["max_workers"]
 
-def _get_executor(kind: str, max_workers: int, thread_name_prefix: str) -> ThreadPoolExecutor:
+
+def _get_executor(kind: str, thread_name_prefix: str) -> ThreadPoolExecutor:
     """Return (and lazily create) a shared ThreadPoolExecutor of the given kind.
 
     Creation is guarded by a process-wide lock so that concurrent first use from
     multiple requests cannot accidentally create and leak multiple executors.
     """
     with _state_lock:
-        executor = _state.get(kind)
+        entry = _state.get(kind)
+        if entry is None:
+            raise ValueError(f"Unknown executor kind: {kind}")
+        executor = entry["executor"]
         if executor is None:
+            max_workers = entry["max_workers"]
             executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
-            _state[kind] = executor
+            entry["executor"] = executor
         return executor
 
 
@@ -43,18 +54,15 @@ def enforce_single_worker(kind: str) -> int:
 
     Returns the previous configured max_workers to aid logging.
     """
-
     kind_normalized = kind.strip().lower()
-    max_attr = f"{kind_normalized.upper()}_MAX_WORKERS"
-    state_key = f"{kind_normalized}_executor"
-    if max_attr not in globals() or state_key not in _state:
-        raise ValueError(f"Unknown executor kind: {kind}")
-
     with _state_lock:
-        previous = int(globals().get(max_attr, 1))
-        globals()[max_attr] = 1
-        executor = _state.get(state_key)
-        _state[state_key] = None
+        entry = _state.get(kind_normalized)
+        if entry is None:
+            raise ValueError(f"Unknown executor kind: {kind}")
+        previous = entry["max_workers"]
+        entry["max_workers"] = 1
+        executor = entry["executor"]
+        entry["executor"] = None
 
     if executor is not None:
         executor.shutdown(wait=True)
@@ -63,63 +71,55 @@ def enforce_single_worker(kind: str) -> int:
 
 
 def get_embedding_executor() -> ThreadPoolExecutor:
-    return _get_executor("embedding_executor", EMBEDDING_MAX_WORKERS, "embed-worker")
+    return _get_executor("embedding", "embed-worker")
 
 
 def get_embedding_count_executor() -> ThreadPoolExecutor:
-    return _get_executor("embedding_count_executor", EMBEDDING_COUNT_MAX_WORKERS, "embed-count")
+    return _get_executor("embedding_count", "embed-count")
 
 
 def get_chat_executor() -> ThreadPoolExecutor:
-    return _get_executor("chat_executor", CHAT_MAX_WORKERS, "chat-worker")
+    return _get_executor("chat", "chat-worker")
 
 
 def get_vision_executor() -> ThreadPoolExecutor:
-    return _get_executor("vision_executor", VISION_MAX_WORKERS, "vision-worker")
+    return _get_executor("vision", "vision-worker")
 
 
 def get_audio_executor() -> ThreadPoolExecutor:
-    return _get_executor("audio_executor", AUDIO_MAX_WORKERS, "audio-worker")
+    return _get_executor("audio", "audio-worker")
+
+
+def _shutdown_executor(kind: str) -> None:
+    """Shutdown and clear an executor of the given kind."""
+    with _state_lock:
+        entry = _state.get(kind)
+        if entry is None:
+            return
+        executor = entry["executor"]
+        entry["executor"] = None
+    if executor is not None:
+        executor.shutdown(wait=True)
 
 
 def shutdown_embedding_executor() -> None:
-    with _state_lock:
-        executor = _state.get("embedding_executor")
-        _state["embedding_executor"] = None
-    if executor is not None:
-        executor.shutdown(wait=True)
+    _shutdown_executor("embedding")
 
 
 def shutdown_embedding_count_executor() -> None:
-    with _state_lock:
-        executor = _state.get("embedding_count_executor")
-        _state["embedding_count_executor"] = None
-    if executor is not None:
-        executor.shutdown(wait=True)
+    _shutdown_executor("embedding_count")
 
 
 def shutdown_chat_executor() -> None:
-    with _state_lock:
-        executor = _state.get("chat_executor")
-        _state["chat_executor"] = None
-    if executor is not None:
-        executor.shutdown(wait=True)
+    _shutdown_executor("chat")
 
 
 def shutdown_vision_executor() -> None:
-    with _state_lock:
-        executor = _state.get("vision_executor")
-        _state["vision_executor"] = None
-    if executor is not None:
-        executor.shutdown(wait=True)
+    _shutdown_executor("vision")
 
 
 def shutdown_audio_executor() -> None:
-    with _state_lock:
-        executor = _state.get("audio_executor")
-        _state["audio_executor"] = None
-    if executor is not None:
-        executor.shutdown(wait=True)
+    _shutdown_executor("audio")
 
 
 def shutdown_executors() -> None:

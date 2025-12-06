@@ -134,6 +134,13 @@ class SpeechModel(Protocol):
 # server with the same style as EmbeddingModel / ChatModel / SpeechModel.
 
 
+@dataclass
+class RerankResult:
+    index: int
+    relevance_score: float
+    document: str | None = None
+
+
 class RerankModel(Protocol):
     name: str
     device: str | torch.device
@@ -145,7 +152,8 @@ class RerankModel(Protocol):
         documents: Sequence[str],
         *,
         top_k: int | None = None,
-    ) -> list[int]: ...
+        cancel_event: threading.Event | None = None,
+    ) -> list[RerankResult]: ...
 
 
 class IntentModel(Protocol):

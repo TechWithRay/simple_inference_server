@@ -1,44 +1,44 @@
-## 性能压测与监控检查指南
+## Performance Testing & Monitoring Guide
 
-### 概览
+### Overview
 
-本文档用于指导对 Simple Inference Server 进行高并发压测与监控检查，主要目标：
+This document provides guidance for high-concurrency load testing and monitoring of Simple Inference Server. Main objectives:
 
-- 验证在目标硬件上，embeddings / chat / audio 在高并发下的 **吞吐量、延迟、错误率**。
-- 利用 `/metrics` 与 `/health` 观测 **限流/队列、批处理、缓存、warmup** 的运行状况。
-- 及时发现配置不当、模型负载过高或潜在资源问题（CPU/GPU 饱和、内存/线程异常增长）。
+- Verify **throughput, latency, and error rates** for embeddings / chat / audio under high concurrency on the target hardware.
+- Use `/metrics` and `/health` to observe **rate limiting/queuing, batching, caching, and warmup** status.
+- Identify configuration issues, model overload, or potential resource problems (CPU/GPU saturation, memory/thread anomalies) early.
 
-本指南只描述方法和建议命令，你可以在需要时再执行。
+This guide describes methods and suggested commands that you can execute as needed.
 
 ---
 
-## 环境准备
+## Environment Setup
 
-### 服务启动
+### Starting the Service
 
-1. 安装依赖：
+1. Install dependencies:
 
 ```bash
 uv sync
 ```
 
-2. 预下载模型（可选，若保留 `AUTO_DOWNLOAD_MODELS=1` 可跳过）：
+2. Pre-download models (optional if `AUTO_DOWNLOAD_MODELS=1` is kept):
 
 ```bash
 MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 uv run python scripts/download_models.py
 MODELS=openai/whisper-tiny uv run python scripts/download_models.py
 ```
 
-3. 启动服务（示例）：
+3. Start the service (example):
 
 ```bash
-# 仅 embeddings + chat
+# Embeddings + chat only
 MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507 \
 MODEL_DEVICE=auto \
 MAX_CONCURRENT=2 \
 uv run python scripts/run_dev.py --device auto
 
-# 加上 Whisper 音频
+# With Whisper audio
 MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507,openai/whisper-tiny \
 MODEL_DEVICE=auto \
 MAX_CONCURRENT=2 \
@@ -46,33 +46,33 @@ AUDIO_MAX_CONCURRENT=1 \
 uv run python scripts/run_dev.py --device auto
 ```
 
-### 基本健康检查
+### Basic Health Check
 
-- `GET /health`：检查模型列表、warmup 是否完成、是否有失败模型；
-- `GET /metrics`：Prometheus 指标抓取端点（本文所有指标名称均来源于此）。
+- `GET /health`: Check model list, warmup completion, and failed models.
+- `GET /metrics`: Prometheus metrics endpoint (all metric names in this document come from here).
 
 ---
 
-### 并发模型快速说明
+### Concurrency Model Quick Reference
 
-- 全局限流：`MAX_CONCURRENT` + `MAX_QUEUE_SIZE` 通过 limiter 控制**最多有多少请求同时在执行模型前向**以及队列长度，防止无界排队。
-- 线程池大小：`EMBEDDING_MAX_WORKERS`、`CHAT_MAX_WORKERS`、`VISION_MAX_WORKERS`、`AUDIO_MAX_WORKERS` 只决定各自 `ThreadPoolExecutor` 的线程数，本身不会绕过 limiter。
-- 推荐做法：
-  - 大多数场景下令 `*_MAX_WORKERS <= MAX_CONCURRENT`，避免在设备上过度抢占 CPU/GPU 线程。
-  - 单机单卡：可以先从 `MAX_CONCURRENT=1` 或 `2` + 小线程池开始，通过调 `EMBEDDING_BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS` 提升吞吐，而不是一味加并发。
-  - 音频路径：`AUDIO_MAX_CONCURRENT` 单独控制 Whisper 的并发度，通常建议小于或等于 `MAX_CONCURRENT`，避免音频任务拖慢 embeddings/chat。
+- Global rate limiting: `MAX_CONCURRENT` + `MAX_QUEUE_SIZE` control **how many requests can execute model forward passes simultaneously** and queue length via limiter, preventing unbounded queuing.
+- Thread pool size: `EMBEDDING_MAX_WORKERS`, `CHAT_MAX_WORKERS`, `VISION_MAX_WORKERS`, `AUDIO_MAX_WORKERS` only determine the thread count in each `ThreadPoolExecutor` and do not bypass the limiter.
+- Recommended practices:
+  - In most scenarios, set `*_MAX_WORKERS <= MAX_CONCURRENT` to avoid excessive CPU/GPU thread contention on the device.
+  - Single machine, single GPU: Start with `MAX_CONCURRENT=1` or `2` plus a small thread pool, and improve throughput by tuning `EMBEDDING_BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS` rather than blindly increasing concurrency.
+  - Audio path: `AUDIO_MAX_CONCURRENT` controls Whisper concurrency separately; it's usually recommended to keep it less than or equal to `MAX_CONCURRENT` to prevent audio tasks from slowing down embeddings/chat.
 
-## 压测场景设计
+## Load Test Scenarios
 
-### 1. Embeddings 压测（高 QPS 高频调用的核心路径）
+### 1. Embeddings Load Test (Core Path for High QPS, High-Frequency Calls)
 
-**推荐脚本**：`scripts/benchmark_embeddings.py`  
-**建议目标**：观察在不同 `MAX_CONCURRENT`、`EMBEDDING_BATCH_WINDOW_MS`、`EMBEDDING_BATCH_WINDOW_MAX_SIZE` 下的吞吐与 p95/p99。
+**Recommended script**: `scripts/benchmark_embeddings.py`  
+**Target**: Observe throughput and p95/p99 under different `MAX_CONCURRENT`, `EMBEDDING_BATCH_WINDOW_MS`, `EMBEDDING_BATCH_WINDOW_MAX_SIZE` settings.
 
-示例命令：
+Example command:
 
 ```bash
-# 单模型、并发 8、请求数 200
+# Single model, concurrency 8, 200 requests
 uv run python scripts/benchmark_embeddings.py \
   --models BAAI/bge-m3 \
   --n-requests 200 \
@@ -80,26 +80,26 @@ uv run python scripts/benchmark_embeddings.py \
   --base-url http://localhost:8000
 ```
 
-**可尝试的维度**：
+**Dimensions to try**:
 
 - `MAX_CONCURRENT = 1 / 2 / 4`
 - `EMBEDDING_BATCH_WINDOW_MS = 0 / 4 / 6 / 10`
 - `EMBEDDING_BATCH_WINDOW_MAX_SIZE = 8 / 16 / 32`
 
-**关注点**：
+**Key metrics to watch**:
 
-- 吞吐量随 `MAX_CONCURRENT` 和 batch window 变化是否有明显提升；
-- 429（Too Many Requests）是否大量出现（说明队列配置过小或模型过慢）；
-- tail latency（p95/p99）是否在可接受范围内。
+- Whether throughput increases significantly with `MAX_CONCURRENT` and batch window changes.
+- Whether 429 (Too Many Requests) errors appear frequently (indicates queue configuration is too small or model is too slow).
+- Whether tail latency (p95/p99) is within acceptable range.
 
 ---
 
-### 2. Chat 文本压测（LLM 短对话）
+### 2. Chat Text Load Test (LLM Short Conversations)
 
-**推荐脚本**：`scripts/benchmark_chat.py`  
-**建议目标**：验证 `ENABLE_CHAT_BATCHING` 下的批处理效果，以及 prompt 限制与回退行为。
+**Recommended script**: `scripts/benchmark_chat.py`  
+**Target**: Verify batching effectiveness under `ENABLE_CHAT_BATCHING`, and prompt limits/fallback behavior.
 
-示例命令：
+Example command:
 
 ```bash
 uv run python scripts/benchmark_chat.py \
@@ -110,40 +110,40 @@ uv run python scripts/benchmark_chat.py \
   --base-url http://localhost:8000
 ```
 
-**可尝试的维度**：
+**Dimensions to try**:
 
 - `CHAT_BATCH_WINDOW_MS = 4 / 8 / 10`
 - `CHAT_BATCH_MAX_SIZE = 4 / 8`
-- `CHAT_MAX_PROMPT_TOKENS` 是否足够大；过小会导致 400。
+- Whether `CHAT_MAX_PROMPT_TOKENS` is large enough; too small will cause 400 errors.
 
-**关注点**：
+**Key metrics to watch**:
 
-- 在批处理开启时，是否能观察到明显更高吞吐；
-- 429 是否主要来自 chat 批队列（而不是全局 limiter），可通过指标区分；
-- prompt 超长时是否返回友好的 400 错误。
-
----
-
-### 3. Chat + Vision（Qwen-VL）功能验证性压测
-
-这类调用通常更重，不建议高并发+长压，只需要：
-
-- 低并发（例如 2–4）；
-- 少量请求（例如 10–20），验证：
-
-  - 远程图片关闭时（`ALLOW_REMOTE_IMAGES=0`），使用 `data:` / 本地路径是否稳定；
-  - 开启远程图片（`ALLOW_REMOTE_IMAGES=1` 且配置 `REMOTE_IMAGE_HOST_ALLOWLIST`）时，大图片或非法 host 能否被拒绝。远程 HTTP fetch 内置了一系列安全措施：仅允许显式 allowlist 中的域名、拒绝私有/环回 IP、限制单次响应大小（`MAX_REMOTE_IMAGE_BYTES`）、校验 MIME 类型与重定向次数，并在 HTTP client 创建时将 `timeout` 与连接上限写入日志，便于排查配置问题。
-
-样例 curl（参考 README 中 Qwen-VL 示例）即可，不必额外写脚本。
+- Whether noticeably higher throughput is observed when batching is enabled.
+- Whether 429 errors mainly come from the chat batch queue (rather than global limiter); this can be distinguished via metrics.
+- Whether overly long prompts return a friendly 400 error.
 
 ---
 
-### 4. Whisper 音频压测
+### 3. Chat + Vision (Qwen-VL) Functional Validation
 
-**推荐脚本**：`scripts/benchmark_audio.py`  
-**建议目标**：验证音频路径不会拖垮 embeddings/chat，`AUDIO_MAX_CONCURRENT` 与 `AUDIO_MAX_QUEUE_SIZE` 是否合适。
+These calls are typically heavier; high concurrency or extended load testing is not recommended. Just need:
 
-示例命令：
+- Low concurrency (e.g., 2–4).
+- Few requests (e.g., 10–20), to verify:
+
+  - When remote images are disabled (`ALLOW_REMOTE_IMAGES=0`), whether `data:` / local path inputs work stably.
+  - When remote images are enabled (`ALLOW_REMOTE_IMAGES=1` with `REMOTE_IMAGE_HOST_ALLOWLIST` configured), whether large images or unauthorized hosts are properly rejected. The remote HTTP fetch includes a series of security measures: only domains explicitly in the allowlist are allowed, private/loopback IPs are rejected, single response size is limited (`MAX_REMOTE_IMAGE_BYTES`), MIME type and redirect count are validated, and `timeout` and connection limits are logged when the HTTP client is created to help troubleshoot configuration issues.
+
+Sample curl commands (refer to Qwen-VL examples in README) are sufficient; no need to write additional scripts.
+
+---
+
+### 4. Whisper Audio Load Test
+
+**Recommended script**: `scripts/benchmark_audio.py`  
+**Target**: Verify the audio path doesn't overwhelm embeddings/chat, and whether `AUDIO_MAX_CONCURRENT` and `AUDIO_MAX_QUEUE_SIZE` are appropriate.
+
+Example command:
 
 ```bash
 BASE_URL=http://localhost:8000 \
@@ -152,16 +152,16 @@ uv run python scripts/benchmark_audio.py \
   -- --n-requests 40 --concurrency 4
 ```
 
-**关注点**：
+**Key metrics to watch**:
 
-- 如果 CPU-only 或低性能 GPU，`AUDIO_MAX_CONCURRENT` 建议从 1 开始；
-- 音频请求不应显著拉高 embeddings/chat 的队列等待时间。
+- For CPU-only or low-performance GPU, start with `AUDIO_MAX_CONCURRENT=1`.
+- Audio requests should not significantly increase queue wait times for embeddings/chat.
 
 ---
 
-## 关键监控指标与预期
+## Key Monitoring Metrics & Expectations
 
-### 1. 请求级别指标
+### 1. Request-Level Metrics
 
 **Embeddings**
 
@@ -181,128 +181,128 @@ uv run python scripts/benchmark_audio.py \
 - `audio_request_latency_seconds{model}`
 - `audio_request_queue_wait_seconds{model}`
 
-**取消与超时（统一语义）**
+**Cancellation & Timeouts (Unified Semantics)**
 
-- 所有三条主路径（embeddings / chat / audio）都通过一个统一的 helper 处理“模型执行 + 客户端断开 + 硬超时”的竞态：
-  - 当达到 `EMBEDDING_GENERATE_TIMEOUT_SEC` / `CHAT_GENERATE_TIMEOUT_SEC` / `AUDIO_PROCESS_TIMEOUT_SEC` 时返回 `504 Gateway Timeout`，并计入各自的 `*_requests_total{status="504"}`；
-  - 客户端主动断开或在服务器侧被视为取消时返回 `499 Client Closed Request`。
-- 这些取消都是 **最佳努力**：不会抢占底层 kernel，只是停止向客户端发送数据并释放队列/并发位；调参时可以通过 499 / 504 的比例来区分“客户端侧取消”与“服务端超时”。
+- All three main paths (embeddings / chat / audio) use a unified helper to handle the race between "model execution + client disconnect + hard timeout":
+  - When `EMBEDDING_GENERATE_TIMEOUT_SEC` / `CHAT_GENERATE_TIMEOUT_SEC` / `AUDIO_PROCESS_TIMEOUT_SEC` is reached, returns `504 Gateway Timeout` and counts toward `*_requests_total{status="504"}`.
+  - When client actively disconnects or is treated as cancelled on server side, returns `499 Client Closed Request`.
+- These cancellations are **best effort**: they don't preempt the underlying kernel, just stop sending data to the client and release queue/concurrency slots. When tuning, you can use the ratio of 499/504 to distinguish "client-side cancellation" from "server-side timeout".
 
-**全局队列拒绝**
+**Global Queue Rejections**
 
-- `embedding_queue_rejections_total`（由 limiter / audio_limiter 共享）
+- `embedding_queue_rejections_total` (shared by limiter / audio_limiter)
 
-**建议检查**：
+**Recommended checks**:
 
-- status=200 的计数是否与压测工具统计的成功请求数吻合；
-- status=429 / 503 是否在可接受比例内（短时间调参时允许小比例，长期运行应尽量减少）；
-- 队列等待时间直方图中是否有大量 >0.1s 或 >1s 的样本。
+- Whether status=200 count matches successful requests reported by the load testing tool.
+- Whether status=429 / 503 rate is acceptable (some during short parameter tuning is OK; should minimize during long-term operation).
+- Whether queue wait time histograms show many samples >0.1s or >1s.
 
 ---
 
-### 2. 批处理与缓存指标
+### 2. Batching & Caching Metrics
 
-**Chat 批处理**
+**Chat Batching**
 
-- `chat_batch_queue_size{model}`：当前 chat batch 队列深度
-- `chat_batch_size{model}`：单次批的请求数分布
-- `chat_batch_wait_seconds{model}`：从 enqueue 到 batch 执行的等待时间
-- `chat_batch_oom_retries_total{model}`：批处理 OOM 重试次数
-- `chat_batch_queue_rejections_total{model}`：因队列限制被拒绝的请求数
-- `chat_batch_requeues_total{model}`：因配置不兼容/回退导致的重入队列次数
-- `chat_count_pool_size`：token counting 线程池大小
+- `chat_batch_queue_size{model}`: Current chat batch queue depth
+- `chat_batch_size{model}`: Distribution of requests per batch
+- `chat_batch_wait_seconds{model}`: Wait time from enqueue to batch execution
+- `chat_batch_oom_retries_total{model}`: Batch OOM retry count
+- `chat_batch_queue_rejections_total{model}`: Requests rejected due to queue limits
+- `chat_batch_requeues_total{model}`: Re-queue count due to incompatible configuration/fallback
+- `chat_count_pool_size`: Token counting thread pool size
 
-当 chat 队列老化严重、请求被 `_QUEUE_MAX_WAIT_SEC` 或 `_REQUEUE_MAX_WAIT_SEC` 丢弃时，日志中会出现类似 `chat_batch_items_dropped_due_to_queue_wait` 的行，包含 `model`、`dropped`（本次被丢弃条数）、`queue_size`、`max_queue_size` 和 `queue_max_wait_sec`。配合 `chat_batch_queue_rejections_total{model}` 一起看，可以判断是 batch 队列本身过小/窗口过长，还是模型实际算力不足。
+When chat queue ages significantly and requests are dropped by `_QUEUE_MAX_WAIT_SEC` or `_REQUEUE_MAX_WAIT_SEC`, logs will show lines like `chat_batch_items_dropped_due_to_queue_wait` with `model`, `dropped` (count dropped this time), `queue_size`, `max_queue_size`, and `queue_max_wait_sec`. Combined with `chat_batch_queue_rejections_total{model}`, you can determine whether the batch queue itself is too small / window too long, or if the model's actual compute capacity is insufficient.
 
-**Embedding 批处理与缓存**
+**Embedding Batching & Caching**
 
-- `embedding_batch_wait_seconds{model}`：embedding 批处理等待时间
+- `embedding_batch_wait_seconds{model}`: Embedding batch wait time
 - `embedding_cache_hits_total{model}`
 - `embedding_cache_misses_total{model}`
 
-**建议检查**：
+**Recommended checks**:
 
-- chat 批大小是否集中在合理范围（如 2–8）；
-- 批等待时间是否与 `CHAT_BATCH_WINDOW_MS` 大致对应，不应经常远超窗口；
-- cache hit/miss 比例是否符合预期：高重复内容场景期待较高 hit；纯随机文本则 miss 为主。
+- Whether chat batch size is concentrated in a reasonable range (e.g., 2–8).
+- Whether batch wait time roughly corresponds to `CHAT_BATCH_WINDOW_MS` and doesn't frequently exceed the window significantly.
+- Whether cache hit/miss ratio meets expectations: high-repetition content scenarios expect high hit rate; purely random text will have mostly misses.
 
 ---
 
-### 3. Warmup 与健康状态
+### 3. Warmup & Health Status
 
-**Warmup 指标**
+**Warmup Metrics**
 
 - `warmup_pool_ready_workers{model,capability,executor}`
 
-**Health 信息（`GET /health`）**
+**Health Info (`GET /health`)**
 
-- `status`：`ok` / `unhealthy`
-- `warmup.ok_models`、`warmup.failures`
+- `status`: `ok` / `unhealthy`
+- `warmup.ok_models`, `warmup.failures`
 - `warmup.capabilities[model][capability]`
-- `chat_batch_queues` / `embedding_batch_queues`：队列深度与 max size
-- `runtime_config`：当前生效的关键参数快照
+- `chat_batch_queues` / `embedding_batch_queues`: Queue depth and max size
+- `runtime_config`: Snapshot of current effective key parameters
 
-**建议检查**：
+**Recommended checks**:
 
-- 启动后 warmup 是否对预期模型与能力标记为 `True`；
-- 若关闭或限制 warmup（通过 `ENABLE_WARMUP=0` 或 allowlist/skiplist），`/health` 输出是否与配置一致；
-- 压测期间 `chat_batch_queues` / `embedding_batch_queues` 是否长期接近上限（若是，说明限流/批窗口/模型瓶颈需调整）。
-
----
-
-## 典型问题与调参思路（Checklist）
-
-1. **大量 429（Too Many Requests）**
-   - 看 `embedding_queue_rejections_total`、`chat_batch_queue_rejections_total`：
-     - 若是 limiter 导致 → 适当增大 `MAX_QUEUE_SIZE` 或 `MAX_CONCURRENT`，同时观察 p99；
-     - 若是 chat batch 队列导致 → 调大 `CHAT_BATCH_QUEUE_SIZE`，或减小 batch window/批大小，避免积压。
-
-2. **p99 延迟过高但 GPU/CPU 利用率不高**
-   - 检查：
-     - `EMBEDDING_BATCH_WINDOW_MS` 是否设置过大；
-     - chat/embedding 队列等待直方图是否拉长；
-   - 调整策略：
-     - 降低 `EMBEDDING_BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS`；
-     - 在单机场景下尝试 `MAX_CONCURRENT=1` 或 2，通过批处理抬高吞吐，而不是单纯加并发。
-
-3. **音频请求拖慢整体响应**
-   - 查看：
-     - `audio_request_queue_wait_seconds` 是否显著升高；
-     - embeddings/chat 的 queue wait 是否同步恶化。
-   - 调整：
-     - 降低 `AUDIO_MAX_CONCURRENT`，并确保 `MAX_CONCURRENT` 主要服务 embeddings/chat；
-     - 必要时将音频单独部署一个实例。
-
-4. **warmup 阶段启动时间过长或偶发 OOM**
-   - 降低：
-   - `WARMUP_BATCH_SIZE`、`WARMUP_STEPS`；
-   - 或限制：
-   - `WARMUP_VRAM_BUDGET_MB`、`WARMUP_VRAM_PER_WORKER_MB`，让 warmup 使用更保守的 worker 数。实际 worker 数 roughly 为 `min(executor_max_workers, MAX_CONCURRENT, floor(budget / per_worker))`；当 `WARMUP_VRAM_BUDGET_MB=0` 时会使用当前设备的可用显存作为 budget。
-   - 通过 `/health` 与 `warmup_pool_ready_workers` 确认 warmup 覆盖与失败模型。
+- After startup, whether warmup marks expected models and capabilities as `True`.
+- If warmup is disabled or restricted (via `ENABLE_WARMUP=0` or allowlist/skiplist), whether `/health` output matches the configuration.
+- During load testing, whether `chat_batch_queues` / `embedding_batch_queues` are consistently near their limits (if so, rate limiting/batch window/model bottleneck needs adjustment).
 
 ---
 
-## 附录：常用命令速查
+## Common Issues & Tuning Strategies (Checklist)
 
-- 列出模型：
+1. **Heavy 429 (Too Many Requests)**
+   - Check `embedding_queue_rejections_total`, `chat_batch_queue_rejections_total`:
+     - If caused by limiter → appropriately increase `MAX_QUEUE_SIZE` or `MAX_CONCURRENT`, while monitoring p99.
+     - If caused by chat batch queue → increase `CHAT_BATCH_QUEUE_SIZE`, or reduce batch window/batch size to avoid backlog.
+
+2. **High p99 latency but GPU/CPU utilization not high**
+   - Check:
+     - Whether `EMBEDDING_BATCH_WINDOW_MS` is set too large.
+     - Whether chat/embedding queue wait histograms are elongated.
+   - Tuning strategy:
+     - Reduce `EMBEDDING_BATCH_WINDOW_MS` / `CHAT_BATCH_WINDOW_MS`.
+     - On single-machine setups, try `MAX_CONCURRENT=1` or 2, and improve throughput through batching rather than simply increasing concurrency.
+
+3. **Audio requests slowing overall response**
+   - Check:
+     - Whether `audio_request_queue_wait_seconds` has increased significantly.
+     - Whether embeddings/chat queue wait has deteriorated simultaneously.
+   - Adjustments:
+     - Reduce `AUDIO_MAX_CONCURRENT`, and ensure `MAX_CONCURRENT` primarily serves embeddings/chat.
+     - If necessary, deploy audio on a separate instance.
+
+4. **Warmup phase takes too long or occasionally triggers OOM**
+   - Reduce:
+     - `WARMUP_BATCH_SIZE`, `WARMUP_STEPS`.
+   - Or limit:
+     - `WARMUP_VRAM_BUDGET_MB`, `WARMUP_VRAM_PER_WORKER_MB` to make warmup use more conservative worker counts. Actual worker count is roughly `min(executor_max_workers, MAX_CONCURRENT, floor(budget / per_worker))`; when `WARMUP_VRAM_BUDGET_MB=0`, the current device's available VRAM is used as budget.
+   - Verify warmup coverage and failed models via `/health` and `warmup_pool_ready_workers`.
+
+---
+
+## Appendix: Quick Reference Commands
+
+- List models:
 
 ```bash
 curl http://localhost:8000/v1/models
 ```
 
-- 健康检查：
+- Health check:
 
 ```bash
 curl http://localhost:8000/health | jq .
 ```
 
-- 抓取部分 Metrics（手看）：
+- Fetch partial Metrics (manual inspection):
 
 ```bash
 curl http://localhost:8000/metrics | grep -E "embedding_request_latency|chat_request_latency|audio_request_latency"
 ```
 
-- 快速 Embeddings 手工测试：
+- Quick Embeddings manual test:
 
 ```bash
 curl -X POST http://localhost:8000/v1/embeddings \
@@ -310,4 +310,4 @@ curl -X POST http://localhost:8000/v1/embeddings \
   -d '{"model":"BAAI/bge-m3","input":["hello","world"]}'
 ```
 
-你可以按本文件的步骤，在需要压测时逐条执行和对照监控。
+Follow the steps in this document when you need to perform load testing, executing commands and checking monitoring results accordingly.

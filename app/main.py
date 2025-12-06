@@ -24,6 +24,7 @@ from app.concurrency.audio_limiter import (
     wait_for_drain as wait_for_drain_audio,
 )
 from app.concurrency.limiter import start_accepting, stop_accepting, wait_for_drain
+from app.config import settings
 from app.logging_config import setup_logging
 from app.middleware import RequestIDMiddleware
 from app.models.registry import ModelRegistry
@@ -59,73 +60,59 @@ _CAPABILITY_EXECUTOR_MAP: dict[str, str] = {
 def _load_model_config() -> tuple[str, list[str] | None, str | None]:
     """Load base configuration paths and allowlists."""
     # Prefer local ./models; if HF_HOME already set, keep it for fallback use
-    os.environ.setdefault("HF_HOME", str(Path.cwd() / "models"))
+    hf_home = settings.hf_home or str(Path.cwd() / "models")
+    os.environ.setdefault("HF_HOME", hf_home)
     
-    config_path = os.getenv("MODEL_CONFIG", "configs/model_config.yaml")
-    models_env = os.getenv("MODELS")
-    model_allowlist = [m.strip() for m in (models_env or "").split(",") if m.strip()] or None
+    config_path = settings.model_config_path
+    model_allowlist = [m.strip() for m in settings.models.split(",") if m.strip()] or None
     
     if model_allowlist is None:
         raise SystemExit(
             "No models specified. Set MODELS env (comma-separated) before starting the service."
         )
-    return config_path, model_allowlist, os.getenv("MODEL_DEVICE")
+    device_override = settings.model_device if settings.model_device != "auto" else None
+    return config_path, model_allowlist, device_override
 
 
 def _init_batching(registry: ModelRegistry) -> tuple[BatchingService, ChatBatchingService, dict[str, Any]]:
     """Initialize batching services and return runtime config components."""
-    batching_enabled = os.getenv("ENABLE_EMBEDDING_BATCHING", "1") != "0"
-    batch_window_ms = float(os.getenv("EMBEDDING_BATCH_WINDOW_MS", "6"))
-    batch_max_size = int(
-        os.getenv("EMBEDDING_BATCH_WINDOW_MAX_SIZE", os.getenv("MAX_BATCH_SIZE", "32"))
-    )
-    batch_queue_size = int(os.getenv("EMBEDDING_BATCH_QUEUE_SIZE", os.getenv("MAX_QUEUE_SIZE", "64")))
-    
     batching_service = BatchingService(
         registry,
-        enabled=batching_enabled,
-        max_batch_size=batch_max_size,
-        window_ms=batch_window_ms,
-        queue_size=batch_queue_size,
+        enabled=settings.enable_embedding_batching,
+        max_batch_size=settings.effective_embedding_batch_max_size,
+        window_ms=settings.embedding_batch_window_ms,
+        queue_size=settings.effective_embedding_batch_queue_size,
     )
-
-    chat_batching_enabled = os.getenv("ENABLE_CHAT_BATCHING", "1") != "0"
-    chat_batch_window_ms = float(os.getenv("CHAT_BATCH_WINDOW_MS", "10"))
-    chat_batch_max_size = int(os.getenv("CHAT_BATCH_MAX_SIZE", "8"))
-    chat_max_prompt_tokens = int(os.getenv("CHAT_MAX_PROMPT_TOKENS", "4096"))
-    chat_max_new_tokens = int(os.getenv("CHAT_MAX_NEW_TOKENS", "2048"))
-    chat_batch_queue_size = int(os.getenv("CHAT_BATCH_QUEUE_SIZE", "64"))
-    chat_allow_vision = os.getenv("CHAT_BATCH_ALLOW_VISION", "0") != "0"
 
     chat_batching_service = ChatBatchingService(
         registry,
-        enabled=chat_batching_enabled,
-        max_batch_size=chat_batch_max_size,
-        window_ms=chat_batch_window_ms,
-        max_prompt_tokens=chat_max_prompt_tokens,
-        max_new_tokens_ceiling=chat_max_new_tokens,
-        queue_size=chat_batch_queue_size,
-        allow_vision=chat_allow_vision,
+        enabled=settings.enable_chat_batching,
+        max_batch_size=settings.chat_batch_max_size,
+        window_ms=settings.chat_batch_window_ms,
+        max_prompt_tokens=settings.chat_max_prompt_tokens,
+        max_new_tokens_ceiling=settings.chat_max_new_tokens,
+        queue_size=settings.chat_batch_queue_size,
+        allow_vision=settings.chat_batch_allow_vision,
     )
 
     # Partial runtime config derived from batching settings
     config = {
-        "max_batch_size": int(os.getenv("MAX_BATCH_SIZE", "32")),
-        "max_text_chars": int(os.getenv("MAX_TEXT_CHARS", "20000")),
-        "enable_batching": batching_enabled,
-        "batch_window_ms": batch_window_ms,
-        "batch_max_size": batch_max_size,
-        "embedding_batch_queue_size": batch_queue_size,
-        "enable_chat_batching": chat_batching_enabled,
-        "chat_batch_window_ms": chat_batch_window_ms,
-        "chat_batch_max_size": chat_batch_max_size,
-        "chat_max_prompt_tokens": chat_max_prompt_tokens,
-        "chat_max_new_tokens": chat_max_new_tokens,
-        "chat_batch_queue_size": chat_batch_queue_size,
-        "chat_queue_max_wait_ms": float(os.getenv("CHAT_QUEUE_MAX_WAIT_MS", "2000")),
-        "chat_requeue_max_wait_ms": float(os.getenv("CHAT_REQUEUE_MAX_WAIT_MS", "2000")),
-        "chat_requeue_max_tasks": int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64")),
-        "embedding_generate_timeout_sec": float(os.getenv("EMBEDDING_GENERATE_TIMEOUT_SEC", "60")),
+        "max_batch_size": settings.max_batch_size,
+        "max_text_chars": settings.max_text_chars,
+        "enable_batching": settings.enable_embedding_batching,
+        "batch_window_ms": settings.embedding_batch_window_ms,
+        "batch_max_size": settings.effective_embedding_batch_max_size,
+        "embedding_batch_queue_size": settings.effective_embedding_batch_queue_size,
+        "enable_chat_batching": settings.enable_chat_batching,
+        "chat_batch_window_ms": settings.chat_batch_window_ms,
+        "chat_batch_max_size": settings.chat_batch_max_size,
+        "chat_max_prompt_tokens": settings.chat_max_prompt_tokens,
+        "chat_max_new_tokens": settings.chat_max_new_tokens,
+        "chat_batch_queue_size": settings.chat_batch_queue_size,
+        "chat_queue_max_wait_ms": settings.chat_queue_max_wait_ms,
+        "chat_requeue_max_wait_ms": settings.chat_requeue_max_wait_ms,
+        "chat_requeue_max_tasks": settings.chat_requeue_max_tasks,
+        "embedding_generate_timeout_sec": settings.embedding_generate_timeout_sec,
     }
     return batching_service, chat_batching_service, config
 
@@ -181,7 +168,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
         "audio_max_concurrent": audio_limits.MAX_CONCURRENT,
         "audio_max_queue_size": audio_limits.MAX_QUEUE_SIZE,
         "audio_queue_timeout_sec": audio_limits.QUEUE_TIMEOUT_SEC,
-        "audio_process_timeout_sec": float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180")),
+        "audio_process_timeout_sec": settings.audio_process_timeout_sec,
         **batch_cfg,
     }
 
@@ -195,7 +182,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
     )
     logger.info("runtime_config", extra=runtime_cfg)
 
-    warmup_required = os.getenv("ENABLE_WARMUP", "1") != "0"
+    warmup_required = settings.enable_warmup
     warmup_failures: list[str] = []
     warmup_completed = not warmup_required
     if warmup_required:
@@ -303,7 +290,7 @@ def _validate_ffmpeg_for_audio(registry: ModelRegistry) -> None:
 def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, cache_dir: str | None) -> None:
     """Optionally download requested models before startup; exit on failure."""
 
-    if os.getenv("AUTO_DOWNLOAD_MODELS", "1") == "0":
+    if not settings.auto_download_models:
         logger.info("Auto download disabled; assuming models are pre-fetched")
         return
     if not hasattr(hf, "snapshot_download"):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,7 @@ from typing import Any
 import torch
 import yaml
 
+from app.config import settings
 from app.models.base import ChatModel, EmbeddingModel
 from app.monitoring.metrics import record_device_memory
 from app.utils.device import resolve_device
@@ -26,7 +26,7 @@ class ModelRegistry:
     ) -> None:
         self.models: dict[str, Any] = {}
         # Prefer CLI/env provided device; fall back to auto-detection.
-        self.device_preference: str = (device or os.getenv("MODEL_DEVICE") or "auto")
+        self.device_preference: str = device or settings.model_device
         self.device = resolve_device(self.device_preference, validate=True)
         self.allowed_models = {m.strip() for m in allowed_models or [] if m.strip()} or None
         self._load_from_config(config_path)

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 from typing import Any
 
 from fastapi import Request
 
-EXECUTOR_GRACE_PERIOD = float(os.getenv("EXECUTOR_GRACE_PERIOD_SEC", "2.0"))
+from app.config import settings
+
+EXECUTOR_GRACE_PERIOD = settings.executor_grace_period_sec
 
 
 class _WorkTimeoutError(Exception):

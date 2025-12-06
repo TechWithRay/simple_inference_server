@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import os
 import threading
 import time
 from typing import Any
 
 import numpy as np
 
+from app.config import settings
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import observe_embedding_batch_wait
 from app.threadpool import get_embedding_executor
@@ -31,14 +31,43 @@ class ModelBatcher:
     def __init__(self, model: Any, max_batch: int, window_ms: float, queue_size: int, queue_timeout: float) -> None:
         self.model = model
         self.max_batch = max_batch
-        self.window = max(window_ms / 1000.0, 0.0)
+        self._base_window = max(window_ms / 1000.0, 0.0)
+        self._min_window = self._base_window * 0.5  # Can shrink to 50% of base
+        self._max_window = self._base_window * 2.0  # Can grow to 200% of base
+        self._current_window = self._base_window
+        self._queue_size = max(queue_size, 1)
         # Bounded queue prevents unbounded memory growth under bursty load.
-        self.queue: asyncio.Queue[_BatchItem] = asyncio.Queue(max(queue_size, 1))
+        self.queue: asyncio.Queue[_BatchItem] = asyncio.Queue(self._queue_size)
         self._task: asyncio.Task[None] | None = None
         # Lazily created on first enqueue to bind to the running loop and avoid
         # multiple workers being spawned under concurrent first use.
         self._start_lock: asyncio.Lock | None = None
         self.queue_timeout = max(queue_timeout, 0.0)
+
+    @property
+    def window(self) -> float:
+        """Current adaptive batch window in seconds."""
+        return self._current_window
+
+    def _adjust_window(self) -> float:
+        """Adjust batch window based on queue depth.
+
+        When queue is fuller, we reduce the window to process faster.
+        When queue is emptier, we increase window to batch more items.
+        """
+        queue_depth = self.queue.qsize()
+        high_threshold = self._queue_size * 0.75
+        low_threshold = self._queue_size * 0.25
+
+        if queue_depth > high_threshold:
+            # Queue is filling up - reduce window to process faster
+            self._current_window = max(self._current_window * 0.75, self._min_window)
+        elif queue_depth < low_threshold:
+            # Queue is mostly empty - increase window to batch more
+            self._current_window = min(self._current_window * 1.25, self._max_window)
+        # else: keep current window
+
+        return self._current_window
 
     async def enqueue(self, texts: list[str], cancel_event: threading.Event | None = None) -> np.ndarray:
         loop = asyncio.get_running_loop()
@@ -68,9 +97,12 @@ class ModelBatcher:
             total = len(item.texts)
             start = time.perf_counter()
 
+            # Adjust window based on queue depth
+            current_window = self._adjust_window()
+
             # Collect within window and max_batch
             while total < self.max_batch:
-                remaining = self.window - (time.perf_counter() - start)
+                remaining = current_window - (time.perf_counter() - start)
                 if remaining <= 0:
                     break
                 try:
@@ -146,12 +178,18 @@ class _AggregateCancel:
     This avoids spawning background threads per batch while still honoring
     cancellations from any request in the batch. The model's cancel check
     calls is_set() which polls all source events.
+
+    The wait() method uses a shared notification event that gets signaled by
+    background monitor threads watching each source event, allowing efficient
+    blocking waits without busy polling.
     """
 
-    __slots__ = ("_events",)
+    __slots__ = ("_events", "_notify", "_monitors_started")
 
     def __init__(self, events: list[threading.Event]) -> None:
         self._events = events
+        self._notify: threading.Event | None = None
+        self._monitors_started = False
 
     def is_set(self) -> bool:
         return any(e.is_set() for e in self._events)
@@ -159,16 +197,51 @@ class _AggregateCancel:
     def set(self) -> None:
         for e in self._events:
             e.set()
+        # Also signal the notify event if waiting
+        if self._notify is not None:
+            self._notify.set()
 
     def wait(self, timeout: float | None = None) -> bool:
-        # Simple polling fallback; not used in hot path but keeps interface compatible.
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if self.is_set():
-                return True
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(0.01)
+        """Wait until any source event is set, or timeout expires.
+
+        Uses a shared notification event for efficient blocking instead of polling.
+        Monitor threads are spawned lazily and run as daemons.
+        """
+        if not self._events:
+            return False
+
+        # Fast path: check if already set
+        if self.is_set():
+            return True
+
+        # Single event case: use native wait
+        if len(self._events) == 1:
+            return self._events[0].wait(timeout)
+
+        # Multiple events: use monitor threads with a shared notify event
+        if self._notify is None:
+            self._notify = threading.Event()
+
+        if not self._monitors_started:
+            self._monitors_started = True
+            for ev in self._events:
+                t = threading.Thread(
+                    target=self._monitor_event,
+                    args=(ev, self._notify),
+                    daemon=True,
+                )
+                t.start()
+
+        # Wait on the shared notify event
+        result = self._notify.wait(timeout)
+        # Double-check that a source event is actually set (notify could be spurious)
+        return self.is_set() if result else False
+
+    @staticmethod
+    def _monitor_event(source: threading.Event, notify: threading.Event) -> None:
+        """Monitor thread that signals notify when source is set."""
+        source.wait()
+        notify.set()
 
 
 def _merge_cancel_events(events: list[threading.Event]) -> _AggregateCancel | threading.Event | None:
@@ -196,18 +269,10 @@ class BatchingService:
         queue_timeout_sec: float | None = None,
     ) -> None:
         self.enabled = enabled
-        self.max_batch_size = max_batch_size or int(
-            os.getenv("EMBEDDING_BATCH_WINDOW_MAX_SIZE", os.getenv("MAX_BATCH_SIZE", "32"))
-        )
-        self.window_ms = window_ms if window_ms is not None else float(
-            os.getenv("EMBEDDING_BATCH_WINDOW_MS", "6")
-        )
-        self.queue_size = queue_size if queue_size is not None else int(
-            os.getenv("EMBEDDING_BATCH_QUEUE_SIZE", os.getenv("MAX_QUEUE_SIZE", "64"))
-        )
-        self.queue_timeout_sec = queue_timeout_sec if queue_timeout_sec is not None else float(
-            os.getenv("EMBEDDING_BATCH_QUEUE_TIMEOUT_SEC", os.getenv("QUEUE_TIMEOUT_SEC", "2.0"))
-        )
+        self.max_batch_size = max_batch_size or settings.effective_embedding_batch_max_size
+        self.window_ms = window_ms if window_ms is not None else settings.embedding_batch_window_ms
+        self.queue_size = queue_size if queue_size is not None else settings.effective_embedding_batch_queue_size
+        self.queue_timeout_sec = queue_timeout_sec if queue_timeout_sec is not None else settings.effective_embedding_batch_queue_timeout_sec
         self._batchers: dict[str, ModelBatcher] = {}
         for name in registry.list_models():
             model = registry.get(name)

@@ -11,7 +11,22 @@ from typing import Any, cast
 
 import pytest
 
+from app.config import get_settings
 from tests.mocks import FakeTensor, InferenceModeContext
+
+
+@pytest.fixture(autouse=True)
+def clear_settings_cache() -> Generator[None, None, None]:
+    """Clear the settings cache before each test to allow env var changes to take effect.
+
+    This runs automatically for all tests and ensures that settings are freshly loaded
+    when tests modify environment variables via monkeypatch.setenv.
+    """
+    # Clear the cache before the test
+    get_settings.cache_clear()
+    yield
+    # Clear again after to ensure clean state for next test
+    get_settings.cache_clear()
 
 # Several tests (and third-party imports) look for torchaudio. Provide a minimal
 # stub with a ModuleSpec so importlib.util.find_spec works without the real

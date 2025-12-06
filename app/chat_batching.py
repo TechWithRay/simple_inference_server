@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import functools
 import logging
-import os
 import threading
 import time
 from collections.abc import Sequence
@@ -14,6 +13,7 @@ from typing import Any
 
 import torch
 
+from app.config import settings
 from app.monitoring.metrics import (
     observe_chat_batch_size,
     observe_chat_batch_wait,
@@ -29,16 +29,16 @@ from app.threadpool import get_chat_executor
 logger = logging.getLogger(__name__)
 _COUNT_EXECUTOR_REF: dict[str, ThreadPoolExecutor | None] = {"value": None}
 _COUNT_EXECUTOR_LOCK = threading.Lock()
-_REQUEUE_RETRIES = max(0, int(os.getenv("CHAT_REQUEUE_RETRIES", "3")))
-_REQUEUE_BASE_DELAY_SEC = max(0.001, float(os.getenv("CHAT_REQUEUE_BASE_DELAY_MS", "5")) / 1000.0)
-_REQUEUE_MAX_DELAY_SEC = float(os.getenv("CHAT_REQUEUE_MAX_DELAY_MS", "100")) / 1000.0
-_REQUEUE_MAX_WAIT_SEC = float(os.getenv("CHAT_REQUEUE_MAX_WAIT_MS", "2000")) / 1000.0
-_QUEUE_MAX_WAIT_SEC = float(os.getenv("CHAT_QUEUE_MAX_WAIT_MS", "2000")) / 1000.0
-_REQUEUE_MAX_TASKS = int(os.getenv("CHAT_REQUEUE_MAX_TASKS", "64"))
-_PREPARE_TIMEOUT_SEC = float(os.getenv("CHAT_PREPARE_TIMEOUT_SEC", "10"))
-_GENERATE_TIMEOUT_SEC = float(os.getenv("CHAT_GENERATE_TIMEOUT_SEC", "60"))
-_OOM_COOLDOWN_SEC = float(os.getenv("CHAT_OOM_COOLDOWN_SEC", "300"))  # 5 minutes default
-_EXECUTOR_GRACE_PERIOD_SEC = float(os.getenv("EXECUTOR_GRACE_PERIOD_SEC", "2.0"))
+_REQUEUE_RETRIES = max(0, settings.chat_requeue_retries)
+_REQUEUE_BASE_DELAY_SEC = max(0.001, settings.chat_requeue_base_delay_ms / 1000.0)
+_REQUEUE_MAX_DELAY_SEC = settings.chat_requeue_max_delay_ms / 1000.0
+_REQUEUE_MAX_WAIT_SEC = settings.chat_requeue_max_wait_ms / 1000.0
+_QUEUE_MAX_WAIT_SEC = settings.chat_queue_max_wait_ms / 1000.0
+_REQUEUE_MAX_TASKS = settings.chat_requeue_max_tasks
+_PREPARE_TIMEOUT_SEC = settings.chat_prepare_timeout_sec
+_GENERATE_TIMEOUT_SEC = settings.chat_generate_timeout_sec
+_OOM_COOLDOWN_SEC = settings.chat_oom_cooldown_sec
+_EXECUTOR_GRACE_PERIOD_SEC = settings.executor_grace_period_sec
 _CANCELLED_SENTINEL = object()
 
 
@@ -75,23 +75,59 @@ class ChatBatcher:
     def __init__(self, model: Any, *, max_batch: int, window_ms: float, max_prompt_tokens: int, max_new_tokens_ceiling: int, queue_size: int) -> None:  # noqa: PLR0913 - explicit config args keep callsites readable
         self.model = model
         self.max_batch = max_batch
-        self.window = max(window_ms / 1000.0, 0.0)
+        self._base_window = max(window_ms / 1000.0, 0.0)
+        self._min_window = self._base_window * 0.5  # Can shrink to 50% of base
+        self._max_window = self._base_window * 2.0  # Can grow to 200% of base
+        self._current_window = self._base_window
         self.max_prompt_tokens = max_prompt_tokens
         self.max_new_tokens_ceiling = max_new_tokens_ceiling
         self.model_name = getattr(model, "name", "unknown")
+        self._queue_size = max(queue_size, 1)
         # Bounded queue to avoid unbounded RAM growth under slow/backlogged models.
-        self.queue: asyncio.Queue[_ChatBatchItem] = asyncio.Queue(maxsize=max(queue_size, 1))
+        self.queue: asyncio.Queue[_ChatBatchItem] = asyncio.Queue(maxsize=self._queue_size)
         self._task: asyncio.Task[None] | None = None
         # Lazily created on first enqueue to bind to the running loop and avoid
         # multiple workers being spawned under concurrent first use.
         self._start_lock: asyncio.Lock | None = None
         self._stopping = False
-        self.oom_retries = 0
+        self._oom_lock = threading.Lock()
+        self._oom_retries = 0
         self._requeue_tasks: dict[asyncio.Task[None], _ChatBatchItem] = {}
         self._pending_requeue_cleanup = False
         # OOM graceful degradation state
         self._current_max_batch = max_batch
         self._oom_cooldown_until: float | None = None
+
+    @property
+    def window(self) -> float:
+        """Current adaptive batch window in seconds."""
+        return self._current_window
+
+    @property
+    def oom_retries(self) -> int:
+        """Thread-safe access to OOM retry count."""
+        with self._oom_lock:
+            return self._oom_retries
+
+    def _adjust_window(self) -> float:
+        """Adjust batch window based on queue depth.
+
+        When queue is fuller, we reduce the window to process faster.
+        When queue is emptier, we increase window to batch more items.
+        """
+        queue_depth = self.queue.qsize()
+        high_threshold = self._queue_size * 0.75
+        low_threshold = self._queue_size * 0.25
+
+        if queue_depth > high_threshold:
+            # Queue is filling up - reduce window to process faster
+            self._current_window = max(self._current_window * 0.75, self._min_window)
+        elif queue_depth < low_threshold:
+            # Queue is mostly empty - increase window to batch more
+            self._current_window = min(self._current_window * 1.25, self._max_window)
+        # else: keep current window
+
+        return self._current_window
 
     async def enqueue(  # noqa: PLR0913 - explicit params keep batching contract clear
         self,
@@ -115,8 +151,7 @@ class ChatBatcher:
         # Enforce prompt length; optionally reuse caller-provided count.
         if prompt_tokens is None:
             # Default to a dedicated counting pool to avoid head-of-line blocking chat generation threads.
-            use_shared = os.getenv("CHAT_COUNT_USE_CHAT_EXECUTOR", "0") != "0"
-            count_executor = _get_count_executor(use_chat_executor=use_shared)
+            count_executor = _get_count_executor(use_chat_executor=settings.chat_count_use_chat_executor)
             try:
                 prompt_tokens = await asyncio.wait_for(
                     loop.run_in_executor(count_executor, self.model.count_tokens, messages),
@@ -256,9 +291,11 @@ class ChatBatcher:
                 self._check_oom_recovery()
                 candidates = [first]
                 start = time.perf_counter()
+                # Adjust window based on queue depth
+                current_window = self._adjust_window()
                 # Pull up to _current_max_batch items within the window (may be reduced due to OOM).
                 while len(candidates) < self._current_max_batch:
-                    remaining = self.window - (time.perf_counter() - start)
+                    remaining = current_window - (time.perf_counter() - start)
                     if remaining <= 0:
                         break
                     try:
@@ -399,7 +436,8 @@ class ChatBatcher:
                 )
             return outputs
         except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):  # pragma: no cover - OOM guard
-            self.oom_retries += 1
+            with self._oom_lock:
+                self._oom_retries += 1
             record_chat_batch_oom_retry(self.model_name)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -574,7 +612,7 @@ def _get_count_executor(*, use_chat_executor: bool) -> ThreadPoolExecutor:
     with _COUNT_EXECUTOR_LOCK:
         cached_executor: ThreadPoolExecutor | None = _COUNT_EXECUTOR_REF.get("value")
         if cached_executor is None:
-            workers = max(1, int(os.getenv("CHAT_COUNT_MAX_WORKERS", "2")))
+            workers = max(1, settings.chat_count_max_workers)
             count_executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat-count")
             _COUNT_EXECUTOR_REF["value"] = count_executor
             record_chat_count_pool_size(workers)

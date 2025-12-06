@@ -1,10 +1,11 @@
-import os
 from contextlib import suppress
 from typing import Any, cast
 
 import torch
 from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 from starlette.applications import Starlette
+
+from app.config import settings
 
 REQUEST_COUNT = Counter(
     "embedding_requests_total",
@@ -95,6 +96,19 @@ CHAT_COUNT_POOL_SIZE = Gauge(
     "Worker count of the chat token counting executor",
 )
 
+RERANK_REQUEST_COUNT = Counter(
+    "rerank_requests_total",
+    "Total number of rerank requests",
+    labelnames=("model", "status"),
+)
+
+RERANK_REQUEST_LATENCY = Histogram(
+    "rerank_request_latency_seconds",
+    "Rerank request latency in seconds",
+    labelnames=("model",),
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
 AUDIO_REQUEST_COUNT = Counter(
     "audio_requests_total",
     "Total number of audio transcription/translation requests",
@@ -171,7 +185,7 @@ WARMUP_POOL_READY = Gauge(
 
 
 def setup_metrics(app: Starlette) -> None:
-    if os.getenv("ENABLE_METRICS", "1") == "0":
+    if not settings.enable_metrics:
         return
     # Mount Prometheus ASGI app at /metrics
     app.mount("/metrics", make_asgi_app())
@@ -299,6 +313,16 @@ def record_cache_usage(model: str, hits: int, misses: int) -> None:
 def observe_embedding_batch_wait(model: str, seconds: float) -> None:
     with suppress(Exception):
         EMBED_BATCH_WAIT.labels(model=model).observe(seconds)
+
+
+def record_rerank_request(model: str, status: str) -> None:
+    with suppress(Exception):
+        RERANK_REQUEST_COUNT.labels(model=model, status=status).inc()
+
+
+def observe_rerank_latency(model: str, seconds: float) -> None:
+    with suppress(Exception):
+        RERANK_REQUEST_LATENCY.labels(model=model).observe(seconds)
 
 
 def record_audio_request(model: str, status: str) -> None:

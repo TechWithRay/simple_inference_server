@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
+import logging
 import threading
 import time
 from pathlib import Path
@@ -22,6 +22,7 @@ from app.concurrency.audio_limiter import (
     reset_queue_label as reset_audio_queue_label,
     set_queue_label as set_audio_queue_label,
 )
+from app.config import settings
 from app.dependencies import get_model_registry
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import (
@@ -38,8 +39,8 @@ from app.threadpool import get_audio_executor
 from app.utils.uploads import chunked_upload_to_tempfile
 
 router = APIRouter()
-logger = __import__("logging").getLogger(__name__)
-MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))  # default 25MB
+logger = logging.getLogger(__name__)
+MAX_AUDIO_BYTES = settings.max_audio_bytes
 UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1MB chunks
 
 
@@ -314,7 +315,7 @@ async def _handle_audio_request(  # noqa: PLR0913
     temp_path: str | None = None
     size_bytes = 0
     duration: float | None = None
-    audio_timeout = float(os.getenv("AUDIO_PROCESS_TIMEOUT_SEC", "180"))
+    audio_timeout = settings.audio_process_timeout_sec
     cancel_event = threading.Event()
     label_token = set_audio_queue_label(model_name or "audio")
 

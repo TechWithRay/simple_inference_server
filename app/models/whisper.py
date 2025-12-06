@@ -6,7 +6,6 @@ import multiprocessing as mp
 import os
 import threading
 import time
-import traceback
 from pathlib import Path
 from typing import Literal
 
@@ -18,15 +17,15 @@ from transformers import (
     pipeline,
 )
 
+from app.config import settings
+from app.models.base import SpeechModel, SpeechResult, SpeechSegment
+from app.models.generation_utils import StopOnCancel
 from app.models.whisper_worker import _worker_loop
 from app.monitoring.metrics import (
     record_whisper_init_failure,
     record_whisper_kill,
     record_whisper_restart,
 )
-
-from app.models.base import SpeechModel, SpeechResult, SpeechSegment
-from app.models.generation_utils import StopOnCancel
 from app.utils.device import resolve_torch_device
 
 logger = logging.getLogger(__name__)
@@ -76,7 +75,7 @@ class WhisperASR(SpeechModel):
         )
 
         # Optional hard-kill path: run transcribe inside a dedicated worker process.
-        self._use_subprocess = os.getenv("WHISPER_USE_SUBPROCESS", "0") != "0"
+        self._use_subprocess = settings.whisper_use_subprocess
         self._proc_ctx = mp.get_context("spawn") if self._use_subprocess else None
         self._worker_proc: mp.process.BaseProcess | None = None
         self._parent_conn: mp.connection.Connection | None = None
@@ -196,7 +195,7 @@ class WhisperASR(SpeechModel):
     def _ensure_worker(self) -> None:
         if not self._use_subprocess:
             return
-        idle_secs = float(os.getenv("WHISPER_SUBPROCESS_IDLE_SEC", "0"))
+        idle_secs = settings.whisper_subprocess_idle_sec
         if self._worker_proc is not None and self._worker_proc.is_alive():
             if idle_secs > 0 and (time.monotonic() - self._last_used) > idle_secs:
                 self._kill_worker(log_reason="idle_timeout")
@@ -261,7 +260,7 @@ class WhisperASR(SpeechModel):
         timestamp_granularity: Literal["word", "segment", None],
         cancel_event: threading.Event | None,
     ) -> SpeechResult:
-        poll_interval = float(os.getenv("WHISPER_SUBPROCESS_POLL_INTERVAL_SEC", "0.05"))
+        poll_interval = settings.whisper_subprocess_poll_interval_sec
 
         if not hasattr(self, "_proc_lock"):
             self._proc_lock = threading.Lock()
@@ -303,15 +302,10 @@ class WhisperASR(SpeechModel):
                     raise RuntimeError("Whisper subprocess died")
 
                 # Optional max wall time if caller relies solely on cancellation.
-                max_wall = os.getenv("WHISPER_SUBPROCESS_MAX_WALL_SEC")
-                if max_wall is not None:
-                    try:
-                        max_wall_f = float(max_wall)
-                        if time.monotonic() - start > max_wall_f:
-                            self._kill_worker()
-                            raise RuntimeError("Whisper subprocess timed out")
-                    except ValueError:
-                        pass
+                max_wall = settings.whisper_subprocess_max_wall_sec
+                if max_wall is not None and time.monotonic() - start > max_wall:
+                    self._kill_worker()
+                    raise RuntimeError("Whisper subprocess timed out")
 
     def close(self) -> None:  # override to also drop worker
         self._kill_worker()

@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 from prometheus_client import Counter
 
+from app.config import get_settings
 from app.models.qwen_vl import QwenVLChat
 from app.monitoring.metrics import REMOTE_IMAGE_REJECTIONS
 
@@ -16,6 +17,7 @@ def _reset_metric(metric: Counter) -> None:
 
 def test_remote_image_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALLOW_REMOTE_IMAGES", "0")
+    get_settings.cache_clear()
     obj = QwenVLChat.__new__(QwenVLChat)
 
     with pytest.raises(ValueError):
@@ -25,6 +27,7 @@ def test_remote_image_disallowed(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_remote_image_private_ip_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALLOW_REMOTE_IMAGES", "1")
     monkeypatch.setenv("REMOTE_IMAGE_HOST_ALLOWLIST", "example.com")
+    get_settings.cache_clear()
     obj = QwenVLChat.__new__(QwenVLChat)
 
     # Force DNS to resolve to a private address
@@ -36,6 +39,7 @@ def test_remote_image_private_ip_blocked(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_data_uri_mime_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REMOTE_IMAGE_MIME_ALLOWLIST", "image/jpeg")
+    get_settings.cache_clear()
     obj = QwenVLChat.__new__(QwenVLChat)
 
     # Stub PIL Image to avoid dependency on real image loading
@@ -66,6 +70,7 @@ def test_remote_image_rejection_metric(monkeypatch: pytest.MonkeyPatch) -> None:
     _reset_metric(REMOTE_IMAGE_REJECTIONS)
     monkeypatch.setenv("ALLOW_REMOTE_IMAGES", "1")
     monkeypatch.setenv("REMOTE_IMAGE_HOST_ALLOWLIST", "example.com")
+    get_settings.cache_clear()
     obj = QwenVLChat.__new__(QwenVLChat)
 
     # Mock httpx client to raise size error via HEAD length

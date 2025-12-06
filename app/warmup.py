@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import io
 import logging
-import os
 import tempfile
 import threading
 import time
@@ -24,6 +23,7 @@ from app.concurrency.limiter import (
     EMBEDDING_MAX_CONCURRENT,
     MAX_CONCURRENT,
 )
+from app.config import settings
 from app.models.base import EmbeddingModel, SpeechModel
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import record_warmup_pool_ready
@@ -110,14 +110,14 @@ def _make_silence_wav(duration_sec: float = 0.2, sample_rate: int = 16000) -> st
 
 
 def _build_warmup_config() -> tuple[WarmupConfig, set[str] | None, set[str] | None]:
-    """Build warmup configuration from environment variables."""
-    batch_size = int(os.getenv("WARMUP_BATCH_SIZE", "1"))
-    steps = int(os.getenv("WARMUP_STEPS", "1"))
-    use_inference_mode = os.getenv("WARMUP_INFERENCE_MODE", "1") != "0"
-    vram_budget_mb = float(os.getenv("WARMUP_VRAM_BUDGET_MB", "0"))
-    per_worker_vram_mb = float(os.getenv("WARMUP_VRAM_PER_WORKER_MB", "1024"))
-    allowlist = _parse_list_env("WARMUP_ALLOWLIST")
-    skiplist = _parse_list_env("WARMUP_SKIPLIST")
+    """Build warmup configuration from settings."""
+    batch_size = settings.warmup_batch_size
+    steps = settings.warmup_steps
+    use_inference_mode = settings.warmup_inference_mode
+    vram_budget_mb = settings.warmup_vram_budget_mb
+    per_worker_vram_mb = settings.warmup_vram_per_worker_mb
+    allowlist = _parse_setting_list(settings.warmup_allowlist)
+    skiplist = _parse_setting_list(settings.warmup_skiplist)
     texts = ["hello world"] * batch_size
 
     executors = {
@@ -610,11 +610,11 @@ def _warmup_vision_model(model: object, device: DeviceLike, config: WarmupConfig
     )
 
 
-def _parse_list_env(var: str) -> set[str] | None:
-    raw = os.getenv(var)
-    if raw is None:
+def _parse_setting_list(value: str) -> set[str] | None:
+    """Parse a comma-separated setting value into a set of strings."""
+    if not value:
         return None
-    values = {item.strip() for item in raw.split(",") if item.strip()}
+    values = {item.strip() for item in value.split(",") if item.strip()}
     return values if values else None
 
 
