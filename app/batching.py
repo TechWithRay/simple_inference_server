@@ -53,7 +53,10 @@ class ModelBatcher:
         """Adjust batch window based on queue depth.
 
         When queue is fuller, we reduce the window to process faster.
-        When queue is emptier, we increase window to batch more items.
+        When queue empties, we restore toward the base window (never exceeds base).
+
+        This ensures adaptive behavior only improves latency under load,
+        and never makes things worse than the configured baseline.
         """
         queue_depth = self.queue.qsize()
         high_threshold = self._queue_size * 0.75
@@ -62,9 +65,9 @@ class ModelBatcher:
         if queue_depth > high_threshold:
             # Queue is filling up - reduce window to process faster
             self._current_window = max(self._current_window * 0.75, self._min_window)
-        elif queue_depth < low_threshold:
-            # Queue is mostly empty - increase window to batch more
-            self._current_window = min(self._current_window * 1.25, self._max_window)
+        elif queue_depth < low_threshold and self._current_window < self._base_window:
+            # Queue is mostly empty and we're below base - restore toward base
+            self._current_window = min(self._current_window * 1.25, self._base_window)
         # else: keep current window
 
         return self._current_window
