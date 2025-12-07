@@ -510,6 +510,7 @@ class ChatBatcher:
             delay = _REQUEUE_BASE_DELAY_SEC
             loop = asyncio.get_running_loop()
             deadline = loop.time() + _REQUEUE_MAX_WAIT_SEC if _REQUEUE_MAX_WAIT_SEC > 0 else None
+            attempts = 0
 
             while True:
                 try:
@@ -523,7 +524,9 @@ class ChatBatcher:
                     record_chat_batch_requeue(self.model_name)
                     return
                 except TimeoutError:
-                    break
+                    attempts += 1
+                    if _REQUEUE_RETRIES and attempts >= _REQUEUE_RETRIES:
+                        break
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _REQUEUE_MAX_DELAY_SEC)
 
