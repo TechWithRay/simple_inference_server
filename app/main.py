@@ -1,8 +1,11 @@
+import asyncio
 import importlib.util
 import logging
 import os
 import shutil
-from collections.abc import AsyncIterator
+import signal
+import threading
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -55,6 +58,49 @@ _CAPABILITY_EXECUTOR_MAP: dict[str, str] = {
     "chat-completion": "chat",
     "text-embedding": "embedding",
 }
+
+async def _run_in_daemon_thread[T](func: Callable[[], T], *, name: str) -> T:
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[T] = loop.create_future()
+
+    def _set_result(result: T) -> None:
+        if fut.done():
+            return
+        fut.set_result(result)
+
+    def _set_exc(exc: BaseException) -> None:
+        if fut.done():
+            return
+        fut.set_exception(exc)
+
+    def _target() -> None:
+        try:
+            result = func()
+        except BaseException as exc:  # noqa: BLE001 - propagate SystemExit/KeyboardInterrupt too
+            try:
+                loop.call_soon_threadsafe(_set_exc, exc)
+            except RuntimeError:
+                return
+        else:
+            try:
+                loop.call_soon_threadsafe(_set_result, result)
+            except RuntimeError:
+                return
+
+    threading.Thread(target=_target, name=name, daemon=True).start()
+    return await fut
+
+
+async def _startup_in_background() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
+    sigint_handler: Any | None = None
+    if threading.current_thread() is threading.main_thread():
+        sigint_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        return await _run_in_daemon_thread(startup, name="model-startup")
+    finally:
+        if sigint_handler is not None:
+            signal.signal(signal.SIGINT, sigint_handler)
 
 
 def _load_model_config() -> tuple[str, list[str] | None, str | None]:
@@ -362,7 +408,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     batching_service = None
     chat_batching_service = None
     try:
-        registry, batching_service, chat_batching_service = startup()
+        registry, batching_service, chat_batching_service = await _startup_in_background()
         app.state.model_registry = registry
         app.state.batching_service = batching_service
         app.state.chat_batching_service = chat_batching_service

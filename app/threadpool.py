@@ -1,10 +1,45 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
-from typing import TypedDict
+from concurrent.futures.thread import _worker  # noqa: PLC2701
+from typing import Any, TypedDict, cast
 
 from app.config import settings
+
+
+class DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor that uses daemon worker threads.
+
+    This makes Ctrl-C / process shutdown responsive even when background work is
+    blocked inside C extensions (e.g., model load / inference). Daemon threads
+    do not prevent interpreter exit.
+    """
+
+    def _adjust_thread_count(self) -> None:  # pragma: no cover - stdlib behavior copy with daemon=True
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_: object, q: Any = self._work_queue) -> None:
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = f"{self._thread_name_prefix or self}_{num_threads}"
+            t = threading.Thread(
+                name=thread_name,
+                target=_worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,
+                    self._initializer,
+                    self._initargs,
+                ),
+                daemon=True,
+            )
+            t.start()
+            cast(set[threading.Thread], self._threads).add(t)
 
 
 class _ExecutorState(TypedDict):
@@ -43,7 +78,7 @@ def _get_executor(kind: str, thread_name_prefix: str) -> ThreadPoolExecutor:
         executor = entry["executor"]
         if executor is None:
             max_workers = entry["max_workers"]
-            executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
+            executor = DaemonThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=thread_name_prefix)
             entry["executor"] = executor
         return executor
 
@@ -98,7 +133,7 @@ def _shutdown_executor(kind: str) -> None:
         executor = entry["executor"]
         entry["executor"] = None
     if executor is not None:
-        executor.shutdown(wait=True)
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def shutdown_embedding_executor() -> None:

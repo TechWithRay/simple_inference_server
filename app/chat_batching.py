@@ -24,7 +24,7 @@ from app.monitoring.metrics import (
     record_chat_batch_requeue,
     record_chat_count_pool_size,
 )
-from app.threadpool import get_chat_executor
+from app.threadpool import DaemonThreadPoolExecutor, get_chat_executor
 
 logger = logging.getLogger(__name__)
 _COUNT_EXECUTOR_REF: dict[str, ThreadPoolExecutor | None] = {"value": None}
@@ -580,7 +580,7 @@ def shutdown_count_executor() -> None:
     executor = _COUNT_EXECUTOR_REF.get("value")
     _COUNT_EXECUTOR_REF["value"] = None
     if executor is not None:
-        executor.shutdown(wait=True)
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _get_count_executor(*, use_chat_executor: bool) -> ThreadPoolExecutor:
@@ -594,7 +594,7 @@ def _get_count_executor(*, use_chat_executor: bool) -> ThreadPoolExecutor:
         cached_executor: ThreadPoolExecutor | None = _COUNT_EXECUTOR_REF.get("value")
         if cached_executor is None:
             workers = max(1, settings.chat_count_max_workers)
-            count_executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat-count")
+            count_executor = DaemonThreadPoolExecutor(max_workers=workers, thread_name_prefix="chat-count")
             _COUNT_EXECUTOR_REF["value"] = count_executor
             record_chat_count_pool_size(workers)
             return count_executor
