@@ -48,9 +48,7 @@ class HealthResponse(BaseModel):
 
 
 @router.get("/v1/models", response_model=ModelsResponse)
-async def list_models(
-    registry: Annotated[Any, Depends(get_model_registry)]
-) -> ModelsResponse:
+async def list_models(registry: Annotated[Any, Depends(get_model_registry)]) -> ModelsResponse:
     models: list[ModelInfo] = []
     for name in registry.list_models():
         model = registry.get(name)
@@ -133,4 +131,3 @@ async def health(
         return JSONResponse(status_code=http_status, content=response.model_dump())
 
     return response
-

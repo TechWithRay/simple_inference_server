@@ -59,9 +59,7 @@ def test_single_text_embedding() -> None:
 
 def test_batch_text_embedding() -> None:
     client = TestClient(create_app())
-    resp = client.post(
-        "/v1/embeddings", json={"model": "dummy", "input": ["a", "b"]}
-    )
+    resp = client.post("/v1/embeddings", json={"model": "dummy", "input": ["a", "b"]})
     assert resp.status_code == HTTP_OK
     payload = resp.json()
     assert len(payload["data"]) == BATCH_TWO

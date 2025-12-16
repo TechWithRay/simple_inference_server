@@ -28,6 +28,7 @@ def clear_settings_cache() -> Generator[None, None, None]:
     # Clear again after to ensure clean state for next test
     get_settings.cache_clear()
 
+
 # Several tests (and third-party imports) look for torchaudio. Provide a minimal
 # stub with a ModuleSpec so importlib.util.find_spec works without the real
 # package installed.
@@ -115,8 +116,10 @@ if not hasattr(_pil, "__path__"):
 _pil_image: Any = types.ModuleType("PIL.Image")
 _pil_image.__spec__ = importlib.machinery.ModuleSpec("PIL.Image", loader=None)
 
+
 class _Image:  # pragma: no cover - stub type only
     pass
+
 
 _pil_image.Image = _Image
 _pil.Image = _Image
@@ -130,12 +133,15 @@ _transformers: Any = sys.modules.get("transformers", types.ModuleType("transform
 if getattr(_transformers, "__spec__", None) is None:
     _transformers.__spec__ = importlib.machinery.ModuleSpec("transformers", loader=None)
 
+
 class _StoppingCriteria:  # pragma: no cover - stub type only
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         pass
 
+
 class _StoppingCriteriaList(list):  # pragma: no cover - stub type only
     pass
+
 
 class _DummyTokenizer:  # pragma: no cover - stub type only
     pad_token_id: int | None = 0
@@ -164,6 +170,7 @@ class _DummyProcessor:  # pragma: no cover - stub type only
     def batch_decode(self, ids: Any, skip_special_tokens: bool = True) -> list[str]:
         return [""]
 
+
 class _DummyModel:  # pragma: no cover - stub type only
     device: Any = "cpu"
 
@@ -179,6 +186,7 @@ class _DummyModel:  # pragma: no cover - stub type only
 
     def eval(self) -> None:
         return None
+
 
 _transformers.AutoModelForCausalLM = _DummyModel
 _transformers.AutoProcessor = _DummyProcessor
@@ -196,6 +204,7 @@ sys.modules["transformers"] = _transformers
 _numpy: Any = sys.modules.get("numpy", types.ModuleType("numpy"))
 if getattr(_numpy, "__spec__", None) is None:
     _numpy.__spec__ = importlib.machinery.ModuleSpec("numpy", loader=None)
+
 
 class _NDArray:  # pragma: no cover - stub type only
     def __init__(self, data: Any) -> None:
@@ -233,6 +242,7 @@ class _NDArray:  # pragma: no cover - stub type only
 
 _numpy.ndarray = _NDArray
 
+
 def _unwrap(val: Any) -> Any:
     return getattr(val, "data", val)
 
@@ -247,9 +257,7 @@ def _as_array(val: Any) -> _NDArray:
 
 _numpy.array = getattr(_numpy, "array", _as_array)
 _numpy.empty = getattr(_numpy, "empty", lambda shape, dtype=None: _NDArray([]))
-_numpy.stack = getattr(
-    _numpy, "stack", lambda seq, axis=0: _NDArray([_wrap(_unwrap(s)) for s in seq])
-)
+_numpy.stack = getattr(_numpy, "stack", lambda seq, axis=0: _NDArray([_wrap(_unwrap(s)) for s in seq]))
 _numpy.repeat = getattr(
     _numpy,
     "repeat",
@@ -262,6 +270,7 @@ _numpy.zeros = getattr(
         [[0 for _ in range(shape[1] if len(shape) > 1 else 0)] for _ in range(shape[0])]
     ),
 )
+
 
 class _TestingModule(types.SimpleNamespace):  # pragma: no cover - stub type only
     @staticmethod
@@ -329,4 +338,3 @@ def mock_torch() -> Generator[None, None, None]:
             setattr(torch_mock, name, original_attrs[name])
         elif hasattr(torch_mock, name):
             delattr(torch_mock, name)
-

@@ -24,9 +24,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 # Context variable to hold the current request ID
-_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "request_id", default=None
-)
+_request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
 
 # Header name for request ID (following common conventions)
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -62,9 +60,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     - The request ID is included in the response headers.
     """
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # Get existing request ID from header or generate a new one
         request_id = request.headers.get(REQUEST_ID_HEADER)
         if not request_id:

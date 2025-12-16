@@ -14,6 +14,7 @@ from app.models.qwen_vl import QwenVLChat
 
 # --- Reusable Mocks ---------------------------------------------------------
 
+
 class MockTokenizer:
     def encode(self, s: str, add_special_tokens: bool = False) -> list[int]:
         return [1, 2, 3] if s else []
@@ -64,6 +65,7 @@ class MockModel:
 
 # --- Tests ------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     ("text", "stop", "expected", "hit"),
     [
@@ -102,7 +104,7 @@ def test_generate_prepared_handles_normalized_inputs(mock_torch: None) -> None:
     obj = QwenVLChat.__new__(QwenVLChat)
     obj.processor = MockProcessor()
     obj.model = MockModel()
-    obj._gen_lock = threading.Lock()
+    obj._gen_lock = threading.RLock()
 
     # Create clean inputs (simulating output of prepare_inputs)
     prepared = {

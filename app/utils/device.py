@@ -90,4 +90,3 @@ def _has_mps() -> bool:
     if mps is None:
         return False
     return bool(mps.is_available())
-

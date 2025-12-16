@@ -125,6 +125,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Embedding batching queue: `EMBEDDING_BATCH_QUEUE_SIZE` (default `64`, falls back to `MAX_QUEUE_SIZE`) bounds the per-model micro-batch queue to prevent unbounded RAM growth.
 - Audio path isolation: `AUDIO_MAX_CONCURRENT` / `AUDIO_MAX_QUEUE_SIZE` / `AUDIO_QUEUE_TIMEOUT_SEC` plus `AUDIO_MAX_WORKERS` size a dedicated limiter + thread pool for Whisper so it will not block chat/embedding traffic; default worker count is **1** and Whisper currently serializes work with a lock, so bumping workers only helps if you fork per-worker pipelines.
   - Handlers must be thread-safe if `AUDIO_MAX_WORKERS` > 1; otherwise wrap shared state with locks (Whisper handler already guards its pipeline but still serializes by default).
+- Vision path isolation: `VISION_MAX_CONCURRENT` / `VISION_MAX_QUEUE_SIZE` / `VISION_QUEUE_TIMEOUT_SEC` plus `VISION_MAX_WORKERS` gate multimodal/image requests on a dedicated limiter + executor so they don't starve text-only chat.
 - Request timeouts: `EMBEDDING_GENERATE_TIMEOUT_SEC` (default `60`) and `AUDIO_PROCESS_TIMEOUT_SEC` (default `180`) bound executor work to keep queues from clogging under hung models.
 - **Cancellation and status codes** (best-effort): for embeddings, chat, and audio we race executor work against client disconnect and a hard timeout. Timeouts surface as `504 Gateway Timeout`; client-side aborts (disconnect or cancel) surface as `499 Client Closed Request`. Model kernels are not preempted—timeouts/cancellations only cut off responses and free queue capacity—so keep `MAX_CONCURRENT` / timeouts conservative.
 - Chat batching (text-only): `ENABLE_CHAT_BATCHING` (default `1`), `CHAT_BATCH_WINDOW_MS` (default `10` ms), `CHAT_BATCH_MAX_SIZE` (default `8`), `CHAT_BATCH_QUEUE_SIZE` (default `64`), `CHAT_MAX_PROMPT_TOKENS` (default `4096`), `CHAT_MAX_NEW_TOKENS` (default `2048`), `CHAT_BATCH_ALLOW_VISION` (default `0` keeps vision models on an unbatched path).
@@ -135,6 +136,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
   - When the HTTP client for remote images is first created, its `timeout` and connection limits are logged so misconfigurations are visible in logs.
 - TODO: add bandwidth/throughput metrics for remote image fetch when enabled.
 - FP8 models need `accelerate`; non-FP8 variants avoid this dependency.
+- `TRUST_REMOTE_CODE_ALLOWLIST`: comma-separated HF repo IDs (or model names) allowed to load with `trust_remote_code=True`. Default empty keeps `trust_remote_code` disabled; models that require custom code will fail to load unless allowlisted.
 
 ## Features
 
@@ -232,9 +234,9 @@ Warmup controls:
 
 Warmup worker selection (VRAM budgeting):
 
-- **Base workers**: per capability, warmup starts from `min(executor_max_workers, MAX_CONCURRENT)`.
-- **VRAM budget**: on CUDA devices, if `WARMUP_VRAM_BUDGET_MB > 0` and `WARMUP_VRAM_PER_WORKER_MB > 0`, warmup further caps workers to `floor(budget / per_worker)`; if `WARMUP_VRAM_BUDGET_MB=0`, the budget defaults to the runtime free VRAM reported by `torch.cuda.mem_get_info`.
-- **Effective workers**: `max(1, min(base_workers, floor(budget / per_worker)))`.
+- **Base workers**: per capability, warmup starts from `min(executor_max_workers, <capability>_MAX_CONCURRENT)` (e.g., `EMBEDDING_MAX_CONCURRENT`, `CHAT_MAX_CONCURRENT`, `VISION_MAX_CONCURRENT`, `AUDIO_MAX_CONCURRENT`).
+- **VRAM budget (CUDA only)**: warmup defaults to **1** worker per capability to avoid oversubscribing GPU memory. If you set both `WARMUP_VRAM_BUDGET_MB > 0` and `WARMUP_VRAM_PER_WORKER_MB > 0`, warmup further caps workers to `floor(budget / per_worker)`.
+- **Effective workers**: `max(1, min(base_workers, floor(budget / per_worker)))` when budgeting is enabled; otherwise 1 on CUDA and `base_workers` on CPU/MPS.
 
 Example: with `MAX_CONCURRENT=4`, an executor sized to 8 workers, `WARMUP_VRAM_BUDGET_MB=4096` and `WARMUP_VRAM_PER_WORKER_MB=1024`, warmup will fan out to 4 workers for that capability.
 
@@ -350,7 +352,7 @@ Unsupported or unregistered `model` values return `404 Model not found`. Be sure
   - `POST /embeddings`: non-OpenAI-compatible embeddings API
 - OpenAI-style streaming chat completions (SSE/chunked responses)
 - Remote image telemetry / tuning: remote fetch is guardrailed with host allowlists, private IP blocking, MIME sniffing, size caps, and redirect checks. Counters at `remote_image_rejections_total{reason}` capture rejects by reason (size/mime/host/private_ip/disabled/allowlist_missing).
-- Rerank: implement lightweight rerank handler/endpoint once a backend is chosen (current codepath removed).
+- Rerank: `/v1/rerank` is implemented but no rerank model is included in `configs/model_config.yaml` by default; pick a reranker model and add a config entry, then consider batching/caching if you need high QPS.
 - Test additions: vision chat path, non-batch chat serialization, prompt-length guard, warmup OOM surfacing.
 
 ## License

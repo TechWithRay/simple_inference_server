@@ -41,9 +41,7 @@ def test_registry_loads_from_config(tmp_path: Path) -> None:
     assert model.capabilities == ["text-embedding"]
 
 
-def test_registry_accepts_specific_cuda_device(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_registry_accepts_specific_cuda_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "model_config.yaml"
     cfg.write_text(
         textwrap.dedent(

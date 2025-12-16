@@ -16,12 +16,14 @@ from app.chat_batching import ChatBatchQueueFullError, ChatBatchQueueTimeoutErro
 from app.concurrency.limiter import (
     CHAT_QUEUE_TIMEOUT_SEC,
     QUEUE_TIMEOUT_SEC,
+    VISION_QUEUE_TIMEOUT_SEC,
     QueueFullError,
     QueueTimeoutError,
     ShuttingDownError,
     chat_limiter,
     reset_queue_label,
     set_queue_label,
+    vision_limiter,
 )
 from app.config import settings
 from app.dependencies import get_model_registry
@@ -37,7 +39,7 @@ from app.routes.common import (
     _run_work_with_client_cancel,
     _WorkTimeoutError,
 )
-from app.threadpool import get_chat_executor
+from app.threadpool import get_chat_executor, get_vision_executor
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -168,9 +170,7 @@ async def _prepare_chat_request(
 ) -> tuple[dict[str, Any] | None, int]:
     loop = asyncio.get_running_loop()
     prepare_timeout = settings.chat_prepare_timeout_sec
-    count_executor = get_count_executor(
-        use_chat_executor=settings.chat_count_use_chat_executor
-    )
+    count_executor = get_count_executor(use_chat_executor=settings.chat_count_use_chat_executor)
     if hasattr(model, "prepare_inputs"):
         try:
             prepared, prompt_tokens = await asyncio.wait_for(
@@ -202,7 +202,6 @@ async def _run_chat_generation(  # noqa: PLR0915
     raw_messages: list[dict[str, Any]],
     has_images: bool,
 ) -> tuple[ChatGeneration, int, int]:
-
     model = _resolve_chat_model_and_caps(registry, req.model, has_images=has_images)
     max_tokens, temperature, top_p = _resolve_generation_params(req, model)
 
@@ -213,7 +212,7 @@ async def _run_chat_generation(  # noqa: PLR0915
         )
 
     loop = asyncio.get_running_loop()
-    executor = get_chat_executor()
+    executor = get_vision_executor() if has_images else get_chat_executor()
     max_prompt_tokens = settings.chat_max_prompt_tokens
     prepared_inputs, prompt_tokens = await _prepare_chat_request(model, raw_messages)
     if prompt_tokens > max_prompt_tokens:
@@ -225,7 +224,9 @@ async def _run_chat_generation(  # noqa: PLR0915
     cancel_event = threading.Event()
     gen_timeout = settings.chat_generate_timeout_sec
     generate_accepts_cancel = "cancel_event" in inspect.signature(model.generate).parameters
-    generate_prepared_accepts_cancel = hasattr(model, "generate_prepared") and "cancel_event" in inspect.signature(model.generate_prepared).parameters
+    generate_prepared_accepts_cancel = (
+        hasattr(model, "generate_prepared") and "cancel_event" in inspect.signature(model.generate_prepared).parameters
+    )
     batcher = getattr(request.app.state, "chat_batching_service", None)
     stop = _normalize_stop(req.stop)
 
@@ -258,11 +259,7 @@ async def _run_chat_generation(  # noqa: PLR0915
         )
 
     async def _run_batched_or_fallback() -> ChatGeneration:
-        if (
-            batcher is not None
-            and getattr(batcher, "is_supported", lambda _m: False)(req.model)
-            and not has_images
-        ):
+        if batcher is not None and getattr(batcher, "is_supported", lambda _m: False)(req.model) and not has_images:
             try:
                 return await batcher.enqueue(
                     req.model,
@@ -283,9 +280,7 @@ async def _run_chat_generation(  # noqa: PLR0915
                 ) from exc
             except ChatBatchQueueFullError as exc:
                 record_chat_request(req.model, "429")
-                logger.info(
-                    "chat_batch_queue_full", extra={"model": req.model, "status": 429}
-                )
+                logger.info("chat_batch_queue_full", extra={"model": req.model, "status": 429})
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Chat batch queue full",
@@ -293,19 +288,44 @@ async def _run_chat_generation(  # noqa: PLR0915
                 ) from exc
             except ChatBatchQueueTimeoutError as exc:
                 record_chat_request(req.model, "429")
-                logger.info(
-                    "chat_batch_queue_timeout", extra={"model": req.model, "status": 429}
-                )
+                logger.info("chat_batch_queue_timeout", extra={"model": req.model, "status": 429})
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Chat batch queue wait exceeded",
                     headers={"Retry-After": str(int(QUEUE_TIMEOUT_SEC))},
+                ) from exc
+            except QueueFullError as exc:
+                record_chat_request(req.model, "429")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Chat request queue full",
+                    headers={"Retry-After": str(int(CHAT_QUEUE_TIMEOUT_SEC))},
+                ) from exc
+            except QueueTimeoutError as exc:
+                record_chat_request(req.model, "429")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Timed out waiting for chat worker",
+                    headers={"Retry-After": str(int(CHAT_QUEUE_TIMEOUT_SEC))},
+                ) from exc
+            except ShuttingDownError as exc:
+                record_chat_request(req.model, "503")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service is shutting down",
                 ) from exc
             except Exception as exc:  # pragma: no cover - defensive fallback
                 logger.warning(
                     "chat_batcher_failed_falling_back",
                     extra={"model": req.model, "error": str(exc)},
                 )
+                label_token = set_queue_label(req.model or "chat")
+                try:
+                    async with chat_limiter():
+                        return await _run_generation()
+                finally:
+                    reset_queue_label(label_token)
+
         return await _run_generation()
 
     work_task = asyncio.ensure_future(_run_batched_or_fallback())
@@ -337,6 +357,8 @@ async def _run_chat_generation(  # noqa: PLR0915
             status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
             detail="Client disconnected",
         ) from exc
+    except (QueueFullError, QueueTimeoutError, ShuttingDownError):
+        raise
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - unexpected runtime failure
@@ -404,11 +426,29 @@ async def create_chat_completions(  # noqa: PLR0912
         )
 
     start = time.perf_counter()
-    label_token = set_queue_label(req.model or "chat")
+    label_token = None
+    has_images = False
     try:
-        async with chat_limiter():
-            raw_messages = [msg.model_dump(mode="python") for msg in req.messages]
-            has_images = _contains_image_content(raw_messages)
+        raw_messages = [msg.model_dump(mode="python") for msg in req.messages]
+        has_images = _contains_image_content(raw_messages)
+
+        batcher = getattr(_request.app.state, "chat_batching_service", None)
+        use_batcher = bool(
+            batcher is not None and getattr(batcher, "is_supported", lambda _m: False)(req.model) and not has_images
+        )
+
+        if not use_batcher:
+            label_token = set_queue_label(req.model or "chat")
+            limiter = vision_limiter if has_images else chat_limiter
+            async with limiter():
+                generation, prompt_tokens, max_tokens = await _run_chat_generation(
+                    req=req,
+                    registry=registry,
+                    request=_request,
+                    raw_messages=raw_messages,
+                    has_images=has_images,
+                )
+        else:
             generation, prompt_tokens, max_tokens = await _run_chat_generation(
                 req=req,
                 registry=registry,
@@ -418,10 +458,11 @@ async def create_chat_completions(  # noqa: PLR0912
             )
     except QueueFullError as exc:
         record_chat_request(req.model, "429")
+        retry_after = VISION_QUEUE_TIMEOUT_SEC if has_images else CHAT_QUEUE_TIMEOUT_SEC
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Chat request queue full",
-            headers={"Retry-After": str(int(CHAT_QUEUE_TIMEOUT_SEC))},
+            detail="Vision request queue full" if has_images else "Chat request queue full",
+            headers={"Retry-After": str(int(retry_after))},
         ) from exc
     except ShuttingDownError as exc:
         record_chat_request(req.model, "503")
@@ -431,13 +472,15 @@ async def create_chat_completions(  # noqa: PLR0912
         ) from exc
     except QueueTimeoutError as exc:
         record_chat_request(req.model, "429")
+        retry_after = VISION_QUEUE_TIMEOUT_SEC if has_images else CHAT_QUEUE_TIMEOUT_SEC
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Timed out waiting for chat worker",
-            headers={"Retry-After": str(int(CHAT_QUEUE_TIMEOUT_SEC))},
+            detail="Timed out waiting for vision worker" if has_images else "Timed out waiting for chat worker",
+            headers={"Retry-After": str(int(retry_after))},
         ) from exc
     finally:
-        reset_queue_label(label_token)
+        if label_token is not None:
+            reset_queue_label(label_token)
 
     latency = time.perf_counter() - start
     observe_chat_latency(req.model, latency)
@@ -453,11 +496,7 @@ async def create_chat_completions(  # noqa: PLR0912
     )
 
     completion_tokens = generation.completion_tokens or 0
-    prompt_tokens = (
-        generation.prompt_tokens
-        if generation.prompt_tokens is not None
-        else prompt_tokens
-    )
+    prompt_tokens = generation.prompt_tokens if generation.prompt_tokens is not None else prompt_tokens
     usage = Usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -475,4 +514,3 @@ async def create_chat_completions(  # noqa: PLR0912
         choices=[choice],
         usage=usage,
     )
-

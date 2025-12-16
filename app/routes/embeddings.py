@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from app.batching import EmbeddingBatchQueueTimeoutError
+from app.batching import BatchingService, EmbeddingBatchQueueTimeoutError
 from app.concurrency.limiter import (
     EMBEDDING_QUEUE_TIMEOUT_SEC,
     QUEUE_TIMEOUT_SEC,
@@ -126,9 +126,7 @@ async def _run_embedding_generation(  # noqa: PLR0913 - explicit kwargs for clar
         batcher = getattr(request.app.state, "batching_service", None)
         loop = asyncio.get_running_loop()
         if batcher is not None and getattr(batcher, "enabled", False):
-            work_task = asyncio.ensure_future(
-                batcher.enqueue(model_name, texts, cancel_event=cancel_event)
-            )
+            work_task = asyncio.ensure_future(batcher.enqueue(model_name, texts, cancel_event=cancel_event))
         else:
             executor = get_embedding_executor()
             work_task = asyncio.ensure_future(
@@ -143,6 +141,8 @@ async def _run_embedding_generation(  # noqa: PLR0913 - explicit kwargs for clar
             cancel_event=cancel_event,
             timeout=timeout,
         )
+    except (QueueFullError, QueueTimeoutError, ShuttingDownError):
+        raise
     except _WorkTimeoutError as exc:
         cancel_event.set()
         record_request(model_name, "504")
@@ -199,11 +199,20 @@ async def create_embeddings(  # noqa: PLR0912
     start = time.perf_counter()
     embed_timeout = settings.embedding_generate_timeout_sec
     cancel_event = threading.Event()
-    label_token = set_queue_label(req.model or "embedding")
-    limiter_cm = _get_embedding_limiter()
-    limiter_ctx = limiter_cm() if callable(limiter_cm) else limiter_cm
+    label_token = None
     try:
-        async with limiter_ctx:
+        batcher = getattr(request.app.state, "batching_service", None)
+        use_batcher = bool(
+            isinstance(batcher, BatchingService) and getattr(batcher, "is_supported", lambda _m: False)(req.model)
+        )
+
+        limiter_ctx = None
+        if not use_batcher:
+            label_token = set_queue_label(req.model or "embedding")
+            limiter_cm = _get_embedding_limiter()
+            limiter_ctx = limiter_cm() if callable(limiter_cm) else limiter_cm
+
+        if limiter_ctx is None:
             vectors = await _run_embedding_generation(
                 registry=registry,
                 model_name=req.model,
@@ -212,6 +221,16 @@ async def create_embeddings(  # noqa: PLR0912
                 cancel_event=cancel_event,
                 timeout=embed_timeout,
             )
+        else:
+            async with limiter_ctx:
+                vectors = await _run_embedding_generation(
+                    registry=registry,
+                    model_name=req.model,
+                    texts=texts,
+                    request=request,
+                    cancel_event=cancel_event,
+                    timeout=embed_timeout,
+                )
     except QueueFullError as exc:
         record_request(req.model, "429")
         raise HTTPException(
@@ -233,7 +252,8 @@ async def create_embeddings(  # noqa: PLR0912
             headers={"Retry-After": str(int(EMBEDDING_QUEUE_TIMEOUT_SEC))},
         ) from exc
     finally:
-        reset_queue_label(label_token)
+        if label_token is not None:
+            reset_queue_label(label_token)
 
     latency = time.perf_counter() - start
     observe_latency(req.model, latency)
@@ -248,12 +268,12 @@ async def create_embeddings(  # noqa: PLR0912
         },
     )
 
-    data = [
-        EmbeddingObject(index=i, embedding=vec.tolist()) for i, vec in enumerate(vectors)
-    ]
+    data = [EmbeddingObject(index=i, embedding=vec.tolist()) for i, vec in enumerate(vectors)]
     usage_model = registry.get(req.model)
     usage = await _build_embedding_usage(usage_model, texts)
     return EmbeddingResponse(data=data, model=req.model, usage=usage)
+
+
 def _get_embedding_limiter() -> Any:
     try:
         from app import api as api_module  # noqa: PLC0415 - local import to avoid circular import

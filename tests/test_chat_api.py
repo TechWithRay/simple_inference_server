@@ -108,5 +108,7 @@ def test_image_rejected_when_model_not_vision() -> None:
         },
     )
     assert resp.status_code == HTTP_BAD_REQUEST
+
+
 PROMPT_TOKENS = 3
 COMPLETION_TOKENS = 2

@@ -33,7 +33,9 @@ def _ensure_audio(path: str) -> bytes:
     return p.read_bytes()
 
 
-async def worker(queue: asyncio.Queue, client: httpx.AsyncClient, audio: bytes, results: list[float], errors: list[str]) -> None:
+async def worker(
+    queue: asyncio.Queue, client: httpx.AsyncClient, audio: bytes, results: list[float], errors: list[str]
+) -> None:
     while True:
         try:
             _ = await queue.get()

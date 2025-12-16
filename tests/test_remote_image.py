@@ -31,7 +31,9 @@ def test_remote_image_private_ip_blocked(monkeypatch: pytest.MonkeyPatch) -> Non
     obj = QwenVLChat.__new__(QwenVLChat)
 
     # Force DNS to resolve to a private address
-    monkeypatch.setattr("socket.getaddrinfo", lambda *_args, **_kwargs: [("family", "type", "proto", "canon", ("127.0.0.1", 0))])
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *_args, **_kwargs: [("family", "type", "proto", "canon", ("127.0.0.1", 0))]
+    )
 
     with pytest.raises(ValueError):
         obj._load_image("http://example.com/image.png")
@@ -59,7 +61,8 @@ def test_data_uri_mime_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # 1x1 PNG data URI
     data_uri = (
-        "data:image/png;base64," "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9YxGDX4AAAAASUVORK5CYII="
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9YxGDX4AAAAASUVORK5CYII="
     )
 
     with pytest.raises(ValueError):

@@ -22,6 +22,7 @@ from app.concurrency.limiter import (
     CHAT_MAX_CONCURRENT,
     EMBEDDING_MAX_CONCURRENT,
     MAX_CONCURRENT,
+    VISION_MAX_CONCURRENT,
 )
 from app.config import settings
 from app.models.base import EmbeddingModel, SpeechModel
@@ -80,8 +81,7 @@ class Generates(Protocol):
         temperature: float,
         top_p: float,
         stop: list[str] | None = None,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 @runtime_checkable
@@ -90,8 +90,7 @@ class Embeds(Protocol):
     device: DeviceLike
     capabilities: list[str]
 
-    def embed(self, texts: list[str]) -> Any:
-        ...
+    def embed(self, texts: list[str]) -> Any: ...
 
 
 def _should_sync(device: DeviceLike) -> bool:
@@ -332,12 +331,16 @@ def _warmup_with_executor(
     run_once: Callable[[], None],
     step_extra: dict[str, float | int | str] | None = None,
 ) -> bool:
-    workers = 1 if not context.thread_safe else _select_worker_count(
-        device=context.device,
-        executor_workers=_executor_workers(context.executor),
-        per_worker_vram_mb=context.config.per_worker_vram_mb,
-        vram_budget_mb=context.config.vram_budget_mb,
-        capability=context.capability,
+    workers = (
+        1
+        if not context.thread_safe
+        else _select_worker_count(
+            device=context.device,
+            executor_workers=_executor_workers(context.executor),
+            per_worker_vram_mb=context.config.per_worker_vram_mb,
+            vram_budget_mb=context.config.vram_budget_mb,
+            capability=context.capability,
+        )
     )
 
     for step in range(context.config.steps):
@@ -431,7 +434,9 @@ def _select_worker_count(
 def _capability_concurrency(capability: str | None) -> int:
     if capability == "text-embedding":
         return EMBEDDING_MAX_CONCURRENT
-    if capability in {"chat-completion", "vision"}:
+    if capability == "vision":
+        return VISION_MAX_CONCURRENT
+    if capability == "chat-completion":
         return CHAT_MAX_CONCURRENT
     if capability and capability.startswith("audio"):
         return AUDIO_MAX_CONCURRENT
@@ -474,9 +479,7 @@ def _warmup_chat_model(model: object, device: DeviceLike, config: WarmupConfig) 
             workers=0,
             ready=False,
         )
-        logger.warning(
-            "warmup_no_generator", extra={"model": getattr(model, "name", "unknown")}
-        )
+        logger.warning("warmup_no_generator", extra={"model": getattr(model, "name", "unknown")})
         return False
 
     messages = [
@@ -518,9 +521,7 @@ def _warmup_audio_model(model: object, device: DeviceLike, config: WarmupConfig)
             workers=0,
             ready=False,
         )
-        logger.warning(
-            "warmup_no_audio", extra={"model": getattr(model, "name", "unknown")}
-        )
+        logger.warning("warmup_no_audio", extra={"model": getattr(model, "name", "unknown")})
         return False
 
     sample_path = _make_silence_wav()
@@ -564,9 +565,7 @@ def _warmup_vision_model(model: object, device: DeviceLike, config: WarmupConfig
             workers=0,
             ready=False,
         )
-        logger.warning(
-            "warmup_no_generator", extra={"model": getattr(model, "name", "unknown")}
-        )
+        logger.warning("warmup_no_generator", extra={"model": getattr(model, "name", "unknown")})
         return False
 
     image = Image.new("RGB", (2, 2), color=(255, 0, 0))

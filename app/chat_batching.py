@@ -13,6 +13,14 @@ from typing import Any
 
 import torch
 
+from app.concurrency.limiter import (
+    QueueFullError,
+    QueueTimeoutError,
+    ShuttingDownError,
+    chat_limiter,
+    reset_queue_label,
+    set_queue_label,
+)
 from app.config import settings
 from app.monitoring.metrics import (
     observe_chat_batch_size,
@@ -72,7 +80,16 @@ class ChatBatchQueueTimeoutError(Exception):
 class ChatBatcher:
     """Per-model chat batcher using a single worker to keep the model thread-safe."""
 
-    def __init__(self, model: Any, *, max_batch: int, window_ms: float, max_prompt_tokens: int, max_new_tokens_ceiling: int, queue_size: int) -> None:  # noqa: PLR0913 - explicit config args keep callsites readable
+    def __init__(  # noqa: PLR0913 - explicit config args keep callsites readable
+        self,
+        model: Any,
+        *,
+        max_batch: int,
+        window_ms: float,
+        max_prompt_tokens: int,
+        max_new_tokens_ceiling: int,
+        queue_size: int,
+    ) -> None:
         self.model = model
         self.max_batch = max_batch
         self.window = max(window_ms / 1000.0, 0.0)
@@ -286,7 +303,9 @@ class ChatBatcher:
                 for item in candidates:
                     buckets.setdefault(item.config_key, []).append(item)
                 batch_items = max(buckets.values(), key=len)
-                leftover: list[_ChatBatchItem] = [it for bucket in buckets.values() for it in bucket if it not in batch_items]
+                leftover: list[_ChatBatchItem] = [
+                    it for bucket in buckets.values() for it in bucket if it not in batch_items
+                ]
                 for pending in leftover:
                     self._schedule_requeue(pending)
 
@@ -304,9 +323,7 @@ class ChatBatcher:
                     for bi in batch_items:
                         if now - bi.enqueue_time > _QUEUE_MAX_WAIT_SEC:
                             if not bi.future.done():
-                                bi.future.set_exception(
-                                    ChatBatchQueueTimeoutError("Chat batch queue wait exceeded")
-                                )
+                                bi.future.set_exception(ChatBatchQueueTimeoutError("Chat batch queue wait exceeded"))
                             bi.cancel_event.set()
                             record_chat_batch_queue_rejection(self.model_name)
                         else:
@@ -328,29 +345,41 @@ class ChatBatcher:
                     batch_items = alive_items
 
                 run_batch = functools.partial(self._generate_batch, list(batch_items))
-                run_future = asyncio.wrap_future(loop.run_in_executor(executor, run_batch))
+                label_token = set_queue_label(self.model_name)
                 try:
-                    results = await asyncio.wait_for(run_future, timeout=_GENERATE_TIMEOUT_SEC)
-                except TimeoutError:  # pragma: no cover - defensive
+                    async with chat_limiter():
+                        run_future = asyncio.wrap_future(loop.run_in_executor(executor, run_batch))
+                        try:
+                            results = await asyncio.wait_for(run_future, timeout=_GENERATE_TIMEOUT_SEC)
+                        except TimeoutError:  # pragma: no cover - defensive
+                            for bi in batch_items:
+                                bi.cancel_event.set()
+                                if not bi.future.done():
+                                    bi.future.set_exception(ChatBatchQueueTimeoutError("Chat generation timed out"))
+                            record_chat_batch_queue_rejection(self.model_name)
+                            await _await_future_grace(run_future, reason="chat_generate_timeout")
+                            continue
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.exception(
+                                "chat_batch_failed",
+                                extra={
+                                    "model": getattr(self.model, "name", "unknown"),
+                                    "batch_size": len(batch_items),
+                                },
+                            )
+                            for bi in batch_items:
+                                if not bi.future.done():
+                                    bi.future.set_exception(exc)
+                            continue
+                except (QueueFullError, QueueTimeoutError, ShuttingDownError) as exc:
                     for bi in batch_items:
                         bi.cancel_event.set()
                         if not bi.future.done():
-                            bi.future.set_exception(ChatBatchQueueTimeoutError("Chat generation timed out"))
-                    record_chat_batch_queue_rejection(self.model_name)
-                    await _await_future_grace(run_future, reason="chat_generate_timeout")
-                    continue
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.exception(
-                        "chat_batch_failed",
-                        extra={
-                            "model": getattr(self.model, "name", "unknown"),
-                            "batch_size": len(batch_items),
-                        },
-                    )
-                    for bi in batch_items:
-                        if not bi.future.done():
                             bi.future.set_exception(exc)
+                    record_chat_batch_queue_rejection(self.model_name)
                     continue
+                finally:
+                    reset_queue_label(label_token)
 
                 for bi, gen in zip(batch_items, results, strict=False):
                     if gen is _CANCELLED_SENTINEL:
@@ -409,9 +438,7 @@ class ChatBatcher:
                 if bi.cancel_event.is_set():
                     outputs.append(_CANCELLED_SENTINEL)
                     continue
-                outputs.append(
-                    self._generate_single(bi, stop_list, max_new_tokens, temperature, top_p)
-                )
+                outputs.append(self._generate_single(bi, stop_list, max_new_tokens, temperature, top_p))
             return outputs
         except (torch.cuda.OutOfMemoryError, torch.OutOfMemoryError):  # pragma: no cover - OOM guard
             with self._oom_lock:
@@ -429,9 +456,7 @@ class ChatBatcher:
                 if bi.cancel_event.is_set():
                     oom_outputs.append(_CANCELLED_SENTINEL)
                     continue
-                oom_outputs.append(
-                    self._generate_single(bi, stop_list, max_new_tokens, temperature, top_p)
-                )
+                oom_outputs.append(self._generate_single(bi, stop_list, max_new_tokens, temperature, top_p))
             return oom_outputs
 
     def _generate_single(

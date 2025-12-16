@@ -15,6 +15,7 @@ class WarmupStatus:
     ok_models: list[str] = field(default_factory=list)
     capabilities: dict[str, dict[str, bool]] = field(default_factory=dict)
 
+
 batching_service: BatchingService | None = None
 chat_batching_service: ChatBatchingService | None = None
 warmup_status: WarmupStatus = WarmupStatus()

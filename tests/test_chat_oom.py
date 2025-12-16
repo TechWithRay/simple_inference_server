@@ -107,7 +107,7 @@ def test_qwen_vl_generate_prepared_oom(monkeypatch: pytest.MonkeyPatch, mock_tor
     obj.hf_repo_id = "dummy-qwen-vl"
     obj.processor = _DummyProcessor()
     obj.model = DummyModel()
-    obj._gen_lock = threading.Lock()
+    obj._gen_lock = threading.RLock()
 
     prepared = {
         "input_ids": torch_mod.ones((1, 3)),

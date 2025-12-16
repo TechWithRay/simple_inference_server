@@ -93,4 +93,3 @@ class TestResolveTorchDevice:
 
         device = resolve_torch_device("auto")
         assert device.type == "cpu"
-

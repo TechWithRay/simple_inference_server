@@ -25,6 +25,7 @@ from app.models.generation_utils import (
     resolve_runtime_device,
     trim_with_stop,
 )
+from app.utils.remote_code import require_trust_remote_code
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,11 @@ class TextChatModel(ChatModel):
         self.device = resolve_runtime_device(device)
         self.hf_repo_id = hf_repo_id
         self.thread_safe = True
+        trust_remote_code = require_trust_remote_code(hf_repo_id, model_name=hf_repo_id)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             hf_repo_id,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=True,
             cache_dir=os.environ.get("HF_HOME"),
         )
@@ -54,7 +56,7 @@ class TextChatModel(ChatModel):
         device_map = self._resolve_device_map(device)
         self.model = AutoModelForCausalLM.from_pretrained(
             hf_repo_id,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=True,
             cache_dir=os.environ.get("HF_HOME"),
             device_map=device_map,

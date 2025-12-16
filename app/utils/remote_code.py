@@ -17,4 +17,3 @@ def require_trust_remote_code(repo_id: str, *, model_name: str | None = None) ->
 
     name_allowed = bool(name_key) and name_key in allowlist
     return repo_key in allowlist or name_allowed
-

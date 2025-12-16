@@ -72,9 +72,7 @@ class DummySpeechModel:
             text="hello audio",
             language=language or "en",
             duration=1.0,
-            segments=[
-                SpeechSegment(id=0, start=0.0, end=1.0, text="hello audio")
-            ],
+            segments=[SpeechSegment(id=0, start=0.0, end=1.0, text="hello audio")],
         )
 
 

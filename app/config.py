@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     chat_count_use_chat_executor: bool = False
 
     # Vision
+    vision_max_concurrent: int | None = None
+    vision_max_queue_size: int | None = None
+    vision_queue_timeout_sec: float | None = None
     vision_max_workers: int = 2
 
     # Audio
@@ -181,7 +184,9 @@ class Settings(BaseSettings):
 
     @property
     def effective_embedding_queue_timeout_sec(self) -> float:
-        return self.embedding_queue_timeout_sec if self.embedding_queue_timeout_sec is not None else self.queue_timeout_sec
+        return (
+            self.embedding_queue_timeout_sec if self.embedding_queue_timeout_sec is not None else self.queue_timeout_sec
+        )
 
     @property
     def effective_chat_max_concurrent(self) -> int:
@@ -208,8 +213,24 @@ class Settings(BaseSettings):
         return self.audio_queue_timeout_sec if self.audio_queue_timeout_sec is not None else self.queue_timeout_sec
 
     @property
+    def effective_vision_max_concurrent(self) -> int:
+        return self.vision_max_concurrent if self.vision_max_concurrent is not None else self.max_concurrent
+
+    @property
+    def effective_vision_max_queue_size(self) -> int:
+        return self.vision_max_queue_size if self.vision_max_queue_size is not None else self.max_queue_size
+
+    @property
+    def effective_vision_queue_timeout_sec(self) -> float:
+        return self.vision_queue_timeout_sec if self.vision_queue_timeout_sec is not None else self.queue_timeout_sec
+
+    @property
     def effective_embedding_batch_max_size(self) -> int:
-        return self.embedding_batch_window_max_size if self.embedding_batch_window_max_size is not None else self.max_batch_size
+        return (
+            self.embedding_batch_window_max_size
+            if self.embedding_batch_window_max_size is not None
+            else self.max_batch_size
+        )
 
     @property
     def effective_embedding_batch_queue_size(self) -> int:
@@ -217,7 +238,11 @@ class Settings(BaseSettings):
 
     @property
     def effective_embedding_batch_queue_timeout_sec(self) -> float:
-        return self.embedding_batch_queue_timeout_sec if self.embedding_batch_queue_timeout_sec is not None else self.queue_timeout_sec
+        return (
+            self.embedding_batch_queue_timeout_sec
+            if self.embedding_batch_queue_timeout_sec is not None
+            else self.queue_timeout_sec
+        )
 
     @property
     def remote_image_host_allowlist_set(self) -> set[str]:

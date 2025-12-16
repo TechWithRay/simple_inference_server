@@ -18,9 +18,7 @@ TIMEOUT = float(os.getenv("TIMEOUT", "30"))
 VERBOSE = os.getenv("VERBOSE", "0") != "0"
 
 
-async def worker(
-    queue: asyncio.Queue, client: httpx.AsyncClient, results: list[float], errors: list[str]
-) -> None:
+async def worker(queue: asyncio.Queue, client: httpx.AsyncClient, results: list[float], errors: list[str]) -> None:
     while True:
         try:
             _ = await queue.get()
@@ -49,10 +47,7 @@ async def run() -> None:
     results: list[float] = []
     errors: list[str] = []
     async with httpx.AsyncClient(verify=VERIFY_SSL, timeout=TIMEOUT) as client:
-        tasks = [
-            asyncio.create_task(worker(queue, client, results, errors))
-            for _ in range(CONCURRENCY)
-        ]
+        tasks = [asyncio.create_task(worker(queue, client, results, errors)) for _ in range(CONCURRENCY)]
         await queue.join()
         for t in tasks:
             t.cancel()

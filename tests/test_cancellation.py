@@ -239,4 +239,3 @@ class TestPerCapabilityLimiters:
                     pass
         finally:
             _state["accepting"] = original
-

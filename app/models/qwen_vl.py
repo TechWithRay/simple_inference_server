@@ -29,6 +29,7 @@ from app.models.generation_utils import (
     trim_with_stop,
 )
 from app.monitoring.metrics import record_remote_image_rejection
+from app.utils.remote_code import require_trust_remote_code
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,15 @@ class QwenVLChat(ChatModel):
         self.capabilities = ["chat-completion", "vision"]
         self.device = resolve_runtime_device(device)
         self.hf_repo_id = hf_repo_id
-        # Generation is serialized via _gen_lock so a single handler instance
-        # is safe even when the shared chat executor has >1 workers.
-        self._gen_lock = threading.Lock()
-        self.thread_safe = False
+        # Serialize all processor/model interactions so a single handler instance
+        # remains safe even when executors have >1 workers.
+        self._gen_lock = threading.RLock()
+        self.thread_safe = True
         models_dir = Path(__file__).resolve().parent.parent.parent / "models"
         self.cache_dir = str(models_dir) if models_dir.exists() else os.environ.get("HF_HOME")
 
         device_map = self._resolve_device_map(device)
+        trust_remote_code = require_trust_remote_code(hf_repo_id, model_name=hf_repo_id)
 
         if "fp8" in hf_repo_id.lower() and not (torch.cuda.is_available() or getattr(torch, "xpu", None)):
             raise RuntimeError(
@@ -58,14 +60,14 @@ class QwenVLChat(ChatModel):
 
         self.processor = AutoProcessor.from_pretrained(
             hf_repo_id,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=True,
             cache_dir=self.cache_dir,
         )
         model_cls: Any = self._resolve_model_cls()
         self.model = model_cls.from_pretrained(
             hf_repo_id,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=True,
             cache_dir=self.cache_dir,
             device_map=device_map,
@@ -115,6 +117,13 @@ class QwenVLChat(ChatModel):
                 )
             return self._http_client
 
+    def _get_gen_lock(self) -> threading.RLock:
+        lock = getattr(self, "_gen_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._gen_lock = lock
+        return lock
+
     # ----------- Public API -------------------------------------------------
     def generate(
         self,
@@ -126,7 +135,7 @@ class QwenVLChat(ChatModel):
         stop: list[str] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> ChatGeneration:
-        with self._gen_lock:
+        with self._get_gen_lock():
             stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
             prepared_inputs, prompt_len = self.prepare_inputs(messages, add_generation_prompt=True)
             inputs = {k: v.to(self.model.device) for k, v in prepared_inputs.items() if k != "_prompt_len"}
@@ -173,7 +182,7 @@ class QwenVLChat(ChatModel):
         stop: list[str] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> ChatGeneration:
-        with self._gen_lock:
+        with self._get_gen_lock():
             stop_criteria, stop_flag = self._build_stop_criteria(stop, cancel_event)
             prompt_len = int(prepared.get("_prompt_len") or prepared["input_ids"].shape[1])
             inputs = {k: v.to(self.model.device) for k, v in prepared.items() if k != "_prompt_len"}
@@ -251,14 +260,15 @@ class QwenVLChat(ChatModel):
         be sent to the model during generation. Set add_generation_prompt=False
         for raw message counting.
         """
-        qwen_messages = self._to_qwen_messages(messages)
-        encoded = self.processor.apply_chat_template(
-            qwen_messages,
-            tokenize=True,
-            add_generation_prompt=add_generation_prompt,
-            return_tensors="pt",
-        )
-        return int(encoded["input_ids"].shape[1])
+        with self._get_gen_lock():
+            qwen_messages = self._to_qwen_messages(messages)
+            encoded = self.processor.apply_chat_template(
+                qwen_messages,
+                tokenize=True,
+                add_generation_prompt=add_generation_prompt,
+                return_tensors="pt",
+            )
+            return int(encoded["input_ids"].shape[1])
 
     def batched_generate_prepared(
         self,
@@ -271,7 +281,7 @@ class QwenVLChat(ChatModel):
         cancel_events: list[threading.Event] | None = None,
     ) -> list[ChatGeneration]:
         # Vision models are not batched by default; fall back to sequential generation.
-        with self._gen_lock:
+        with self._get_gen_lock():
             cancel_events = cancel_events or [threading.Event() for _ in prepared_list]
             generations: list[ChatGeneration] = []
             for prepared, cancel_event in zip(prepared_list, cancel_events, strict=False):
@@ -293,18 +303,19 @@ class QwenVLChat(ChatModel):
         *,
         add_generation_prompt: bool = True,
     ) -> tuple[dict[str, Any], int]:
-        qwen_messages = self._to_qwen_messages(messages)
-        raw_inputs = self.processor.apply_chat_template(
-            qwen_messages,
-            tokenize=True,
-            add_generation_prompt=add_generation_prompt,
-            return_tensors="pt",
-            return_dict=True,
-        )
-        inputs = self._normalize_chat_template_output(raw_inputs)
-        prompt_len = int(inputs["input_ids"].shape[1])
-        inputs["_prompt_len"] = prompt_len
-        return inputs, prompt_len
+        with self._get_gen_lock():
+            qwen_messages = self._to_qwen_messages(messages)
+            raw_inputs = self.processor.apply_chat_template(
+                qwen_messages,
+                tokenize=True,
+                add_generation_prompt=add_generation_prompt,
+                return_tensors="pt",
+                return_dict=True,
+            )
+            inputs = self._normalize_chat_template_output(raw_inputs)
+            prompt_len = int(inputs["input_ids"].shape[1])
+            inputs["_prompt_len"] = prompt_len
+            return inputs, prompt_len
 
     # ----------- Helpers ----------------------------------------------------
     def _build_stop_criteria(

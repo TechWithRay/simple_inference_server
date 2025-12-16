@@ -38,7 +38,6 @@ from app.threadpool import (
     CHAT_MAX_WORKERS,
     EMBEDDING_MAX_WORKERS,
     VISION_MAX_WORKERS,
-    enforce_single_worker,
     get_audio_executor,
     get_chat_executor,
     get_embedding_count_executor,
@@ -58,6 +57,7 @@ _CAPABILITY_EXECUTOR_MAP: dict[str, str] = {
     "chat-completion": "chat",
     "text-embedding": "embedding",
 }
+
 
 async def _run_in_daemon_thread[T](func: Callable[[], T], *, name: str) -> T:
     loop = asyncio.get_running_loop()
@@ -108,14 +108,12 @@ def _load_model_config() -> tuple[str, list[str] | None, str | None]:
     # Prefer local ./models; if HF_HOME already set, keep it for fallback use
     hf_home = settings.hf_home or str(Path.cwd() / "models")
     os.environ.setdefault("HF_HOME", hf_home)
-    
+
     config_path = settings.model_config_path
     model_allowlist = [m.strip() for m in settings.models.split(",") if m.strip()] or None
-    
+
     if model_allowlist is None:
-        raise SystemExit(
-            "No models specified. Set MODELS env (comma-separated) before starting the service."
-        )
+        raise SystemExit("No models specified. Set MODELS env (comma-separated) before starting the service.")
     device_override = settings.model_device if settings.model_device != "auto" else None
     return config_path, model_allowlist, device_override
 
@@ -173,7 +171,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
 
     _download_models_if_enabled(config_path, model_allowlist, cache_dir)
     _warn_if_accelerate_missing(config_path, model_allowlist)
-    
+
     try:
         registry = ModelRegistry(
             config_path,
@@ -188,7 +186,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
     _validate_ffmpeg_for_audio(registry)
 
     batching_service, chat_batching_service, batch_cfg = _init_batching(registry)
-    
+
     state.batching_service = batching_service
     state.chat_batching_service = chat_batching_service
 
@@ -206,6 +204,15 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
         "max_concurrent": limiter.MAX_CONCURRENT,
         "max_queue_size": limiter.MAX_QUEUE_SIZE,
         "queue_timeout_sec": limiter.QUEUE_TIMEOUT_SEC,
+        "embedding_max_concurrent": limiter.EMBEDDING_MAX_CONCURRENT,
+        "embedding_max_queue_size": limiter.EMBEDDING_MAX_QUEUE_SIZE,
+        "embedding_queue_timeout_sec": limiter.EMBEDDING_QUEUE_TIMEOUT_SEC,
+        "chat_max_concurrent": limiter.CHAT_MAX_CONCURRENT,
+        "chat_max_queue_size": limiter.CHAT_MAX_QUEUE_SIZE,
+        "chat_queue_timeout_sec": limiter.CHAT_QUEUE_TIMEOUT_SEC,
+        "vision_max_concurrent": limiter.VISION_MAX_CONCURRENT,
+        "vision_max_queue_size": limiter.VISION_MAX_QUEUE_SIZE,
+        "vision_queue_timeout_sec": limiter.VISION_QUEUE_TIMEOUT_SEC,
         "embedding_max_workers": getattr(embedding_executor, "_max_workers", EMBEDDING_MAX_WORKERS),
         "embedding_count_max_workers": getattr(embedding_count_executor, "_max_workers", None),
         "chat_max_workers": getattr(chat_executor, "_max_workers", CHAT_MAX_WORKERS),
@@ -278,9 +285,7 @@ def _warn_if_accelerate_missing(config_path: str, allowlist: list[str] | None) -
 
     if fp8_models:
         if importlib.util.find_spec("accelerate") is None:
-            raise SystemExit(
-                f"FP8 models {fp8_models} require 'accelerate'. Install it or select non-FP8 repos."
-            )
+            raise SystemExit(f"FP8 models {fp8_models} require 'accelerate'. Install it or select non-FP8 repos.")
         if not torch.cuda.is_available() and not getattr(torch, "xpu", None):
             raise SystemExit(
                 f"FP8 models {fp8_models} require a GPU/XPU runtime. Select non-FP8 variants or run on GPU/XPU."
@@ -288,9 +293,20 @@ def _warn_if_accelerate_missing(config_path: str, allowlist: list[str] | None) -
 
 
 def _enforce_thread_safety(registry: ModelRegistry) -> None:
-    """Enforce single-worker executors for thread-unsafe models and log warnings."""
-    enforced_kinds: set[str] = set()
+    """Warn when thread-unsafe models may be invoked concurrently.
 
+    Handlers can mark themselves thread-unsafe (thread_safe=False) to signal they
+    must serialize internal state (tokenizers, pipelines, clients). We do not
+    globally force executors down to a single worker because that would
+    penalize unrelated models sharing the same executor.
+    """
+
+    executor_workers = {
+        "embedding": getattr(get_embedding_executor(), "_max_workers", EMBEDDING_MAX_WORKERS),
+        "chat": getattr(get_chat_executor(), "_max_workers", CHAT_MAX_WORKERS),
+        "vision": getattr(get_vision_executor(), "_max_workers", VISION_MAX_WORKERS),
+        "audio": getattr(get_audio_executor(), "_max_workers", AUDIO_MAX_WORKERS),
+    }
     for name in registry.list_models():
         model = registry.get(name)
         if getattr(model, "thread_safe", True):
@@ -299,25 +315,20 @@ def _enforce_thread_safety(registry: ModelRegistry) -> None:
         caps = getattr(model, "capabilities", [])
         for cap in caps:
             executor_kind = _CAPABILITY_EXECUTOR_MAP.get(cap)
-            if executor_kind is None or executor_kind in enforced_kinds:
+            if executor_kind is None:
                 continue
-
-            previous = enforce_single_worker(executor_kind)
-            enforced_kinds.add(executor_kind)
-
-            if previous > 1:
-                logger.warning(
-                    "thread_unsafe_model_with_multiple_workers",
-                    extra={
-                        "model": name,
-                        "capability": cap,
-                        "executor": executor_kind,
-                        "workers": previous,
-                        "forced_workers": 1,
-                    },
-                )
-
-
+            workers = executor_workers.get(executor_kind, 1)
+            if workers <= 1:
+                continue
+            logger.warning(
+                "thread_unsafe_model_with_multiple_workers",
+                extra={
+                    "model": name,
+                    "capability": cap,
+                    "executor": executor_kind,
+                    "workers": workers,
+                },
+            )
 
 
 def _validate_ffmpeg_for_audio(registry: ModelRegistry) -> None:
@@ -328,8 +339,7 @@ def _validate_ffmpeg_for_audio(registry: ModelRegistry) -> None:
         return
     if shutil.which("ffmpeg") is None:
         raise SystemExit(
-            "ffmpeg not found on PATH. Whisper/audio models require ffmpeg for decoding. "
-            "Install ffmpeg and restart."
+            "ffmpeg not found on PATH. Whisper/audio models require ffmpeg for decoding. Install ffmpeg and restart."
         )
 
 

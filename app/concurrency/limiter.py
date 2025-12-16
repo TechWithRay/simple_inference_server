@@ -5,7 +5,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.monitoring.metrics import GENERIC_LABEL_WARN, observe_queue_wait, record_queue_rejection
+from app.monitoring.metrics import (
+    GENERIC_LABEL_WARN,
+    observe_chat_queue_wait,
+    observe_queue_wait,
+    record_queue_rejection,
+)
 
 
 class QueueFullError(Exception):
@@ -34,6 +39,11 @@ CHAT_MAX_CONCURRENT = settings.effective_chat_max_concurrent
 CHAT_MAX_QUEUE_SIZE = settings.effective_chat_max_queue_size
 CHAT_QUEUE_TIMEOUT_SEC = settings.effective_chat_queue_timeout_sec
 
+# Vision limiter (separate from chat; used for multimodal / image-heavy requests)
+VISION_MAX_CONCURRENT = settings.effective_vision_max_concurrent
+VISION_MAX_QUEUE_SIZE = settings.effective_vision_max_queue_size
+VISION_QUEUE_TIMEOUT_SEC = settings.effective_vision_queue_timeout_sec
+
 # Shared state for shutdown coordination
 _state = {"accepting": True}
 _queue_label: contextvars.ContextVar[str] = contextvars.ContextVar("queue_label", default="generic")
@@ -49,6 +59,12 @@ _chat_semaphore: asyncio.Semaphore = asyncio.Semaphore(CHAT_MAX_CONCURRENT)
 _chat_queue: asyncio.Queue[int] = asyncio.Queue(CHAT_MAX_QUEUE_SIZE)
 _chat_in_flight_state = {"count": 0}
 _chat_in_flight_lock = asyncio.Lock()
+
+# Vision limiter state
+_vision_semaphore: asyncio.Semaphore = asyncio.Semaphore(VISION_MAX_CONCURRENT)
+_vision_queue: asyncio.Queue[int] = asyncio.Queue(VISION_MAX_QUEUE_SIZE)
+_vision_in_flight_state = {"count": 0}
+_vision_in_flight_lock = asyncio.Lock()
 
 
 def set_queue_label(label: str) -> contextvars.Token[str]:
@@ -134,7 +150,7 @@ async def chat_limiter() -> AsyncIterator[None]:
         try:
             await asyncio.wait_for(_chat_semaphore.acquire(), timeout=CHAT_QUEUE_TIMEOUT_SEC)
             acquired = True
-            observe_queue_wait(label, asyncio.get_running_loop().time() - start_wait)
+            observe_chat_queue_wait(label, asyncio.get_running_loop().time() - start_wait)
         except TimeoutError as exc:
             record_queue_rejection()
             raise QueueTimeoutError("Timed out waiting for chat worker") from exc
@@ -152,6 +168,51 @@ async def chat_limiter() -> AsyncIterator[None]:
         if queued:
             _chat_queue.get_nowait()
             _chat_queue.task_done()
+
+
+@asynccontextmanager
+async def vision_limiter() -> AsyncIterator[None]:
+    """Per-capability concurrency guard for vision (multimodal) chat work.
+
+    This isolates heavier vision requests from text-only chat traffic.
+    """
+    if not _state["accepting"]:
+        raise ShuttingDownError("Service is shutting down")
+    queued = False
+    label = _queue_label.get()
+    if label == "generic":
+        GENERIC_LABEL_WARN.inc()
+    try:
+        _vision_queue.put_nowait(1)
+        queued = True
+    except asyncio.QueueFull as exc:
+        record_queue_rejection()
+        raise QueueFullError("Vision request queue is full") from exc
+
+    acquired = False
+    start_wait = asyncio.get_running_loop().time()
+    try:
+        try:
+            await asyncio.wait_for(_vision_semaphore.acquire(), timeout=VISION_QUEUE_TIMEOUT_SEC)
+            acquired = True
+            observe_chat_queue_wait(label, asyncio.get_running_loop().time() - start_wait)
+        except TimeoutError as exc:
+            record_queue_rejection()
+            raise QueueTimeoutError("Timed out waiting for vision worker") from exc
+
+        async with _vision_in_flight_lock:
+            _vision_in_flight_state["count"] += 1
+        try:
+            yield
+        finally:
+            async with _vision_in_flight_lock:
+                _vision_in_flight_state["count"] = max(0, _vision_in_flight_state["count"] - 1)
+    finally:
+        if acquired:
+            _vision_semaphore.release()
+        if queued:
+            _vision_queue.get_nowait()
+            _vision_queue.task_done()
 
 
 def stop_accepting() -> None:
@@ -174,8 +235,10 @@ async def wait_for_drain(timeout: float = 5.0) -> None:
             embedding_active = _embedding_in_flight_state["count"]
         async with _chat_in_flight_lock:
             chat_active = _chat_in_flight_state["count"]
-        queue_backlog = _embedding_queue.qsize() + _chat_queue.qsize()
-        total_active = embedding_active + chat_active
+        async with _vision_in_flight_lock:
+            vision_active = _vision_in_flight_state["count"]
+        queue_backlog = _embedding_queue.qsize() + _chat_queue.qsize() + _vision_queue.qsize()
+        total_active = embedding_active + chat_active + vision_active
         if total_active == 0 and queue_backlog == 0:
             break
         if loop.time() >= deadline:

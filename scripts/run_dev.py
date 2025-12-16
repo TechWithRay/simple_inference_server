@@ -13,7 +13,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the embedding API locally with reload")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")  # noqa: S104
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
-    parser.add_argument("--device", default=os.getenv("MODEL_DEVICE", "auto"), help="Device to load models on (cpu|mps|cuda[:idx]|auto)")
+    parser.add_argument(
+        "--device", default=os.getenv("MODEL_DEVICE", "auto"), help="Device to load models on (cpu|mps|cuda[:idx]|auto)"
+    )
     parser.add_argument(
         "--config",
         default=os.getenv("MODEL_CONFIG", DEFAULT_MODEL_CONFIG),

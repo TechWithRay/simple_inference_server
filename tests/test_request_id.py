@@ -85,4 +85,3 @@ def test_get_request_id_returns_none_outside_request() -> None:
     """get_request_id returns None when not in a request context."""
     # Outside of request context, should return None
     assert get_request_id() is None
-

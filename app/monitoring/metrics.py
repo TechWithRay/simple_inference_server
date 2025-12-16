@@ -363,6 +363,8 @@ def record_whisper_init_failure(model: str) -> None:
 def record_remote_image_rejection(reason: str) -> None:
     with suppress(Exception):
         REMOTE_IMAGE_REJECTIONS.labels(reason=reason).inc()
+
+
 AUDIO_GENERIC_LABEL_WARN = Counter(
     "audio_queue_generic_label_warn_total",
     "Audio limiter used generic label instead of model/task",

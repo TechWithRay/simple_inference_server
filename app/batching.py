@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from app.concurrency.limiter import embedding_limiter, reset_queue_label, set_queue_label
 from app.config import settings
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import observe_embedding_batch_wait
@@ -20,7 +21,9 @@ class EmbeddingBatchQueueTimeoutError(Exception):
 
 
 class _BatchItem:
-    def __init__(self, texts: list[str], future: asyncio.Future[np.ndarray], cancel_event: threading.Event | None) -> None:
+    def __init__(
+        self, texts: list[str], future: asyncio.Future[np.ndarray], cancel_event: threading.Event | None
+    ) -> None:
         self.texts = texts
         self.future = future
         self.enqueue_time = asyncio.get_running_loop().time()
@@ -70,7 +73,7 @@ class ModelBatcher:
             raise EmbeddingBatchQueueTimeoutError("Embedding batch queue wait exceeded") from exc
         return await fut
 
-    async def _worker(self) -> None:  # noqa: PLR0912
+    async def _worker(self) -> None:  # noqa: PLR0912, PLR0915
         loop = asyncio.get_running_loop()
         executor = get_embedding_executor()
         while True:
@@ -119,10 +122,19 @@ class ModelBatcher:
                 continue
 
             try:
-                vectors = await loop.run_in_executor(
-                    executor,
-                    functools.partial(self.model.embed, texts, cancel_event=cancel_event),
-                )
+                label_token = set_queue_label(getattr(self.model, "name", "unknown"))
+                try:
+                    async with embedding_limiter():
+                        vectors = await loop.run_in_executor(
+                            executor,
+                            functools.partial(
+                                self.model.embed,
+                                texts,
+                                cancel_event=cancel_event,
+                            ),
+                        )
+                finally:
+                    reset_queue_label(label_token)
             except Exception as exc:  # pragma: no cover - defensive
                 for bi in active_items:
                     if not bi.future.done():
@@ -261,7 +273,9 @@ class BatchingService:
         self.max_batch_size = max_batch_size or settings.effective_embedding_batch_max_size
         self.window_ms = window_ms if window_ms is not None else settings.embedding_batch_window_ms
         self.queue_size = queue_size if queue_size is not None else settings.effective_embedding_batch_queue_size
-        self.queue_timeout_sec = queue_timeout_sec if queue_timeout_sec is not None else settings.effective_embedding_batch_queue_timeout_sec
+        self.queue_timeout_sec = (
+            queue_timeout_sec if queue_timeout_sec is not None else settings.effective_embedding_batch_queue_timeout_sec
+        )
         self._batchers: dict[str, ModelBatcher] = {}
         for name in registry.list_models():
             model = registry.get(name)
@@ -285,7 +299,12 @@ class BatchingService:
         for batcher in self._batchers.values():
             await batcher.start()
 
-    async def enqueue(self, model_name: str, texts: list[str], cancel_event: threading.Event | None = None) -> np.ndarray:
+    def is_supported(self, model_name: str) -> bool:
+        return self.enabled and model_name in self._batchers
+
+    async def enqueue(
+        self, model_name: str, texts: list[str], cancel_event: threading.Event | None = None
+    ) -> np.ndarray:
         if not self.enabled:
             raise RuntimeError("Batching disabled")
         if model_name not in self._batchers:

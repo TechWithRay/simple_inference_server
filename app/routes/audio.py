@@ -177,10 +177,7 @@ def _format_audio_response(
             text=text,
             language=language_out,
             duration=duration_out,
-            segments=[
-                TranscriptionSegment(id=s.id, start=s.start, end=s.end, text=s.text)
-                for s in segments
-            ]
+            segments=[TranscriptionSegment(id=s.id, start=s.start, end=s.end, text=s.text) for s in segments]
             if segments
             else None,
         )

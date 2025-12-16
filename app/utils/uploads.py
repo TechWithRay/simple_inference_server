@@ -26,6 +26,7 @@ async def chunked_upload_to_tempfile(
     exception_factory: Callable[[int, int], Exception]
 
     if on_exceed is None:
+
         def _default_exception(limit: int, size: int) -> Exception:  # pragma: no cover - default
             return HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

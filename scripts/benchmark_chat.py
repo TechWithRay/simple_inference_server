@@ -86,10 +86,7 @@ async def run(args: argparse.Namespace) -> None:
 
     successes = len(results)
     failures = len(errors)
-    print(
-        f"Requests: {args.n_requests}, Concurrency: {args.concurrency}, "
-        f"Successes: {successes}, Failures: {failures}"
-    )
+    print(f"Requests: {args.n_requests}, Concurrency: {args.concurrency}, Successes: {successes}, Failures: {failures}")
 
     if results:
         arr = np.array(results)

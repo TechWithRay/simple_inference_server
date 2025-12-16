@@ -189,4 +189,3 @@ def _get_rerank_limiter() -> Any:
         return getattr(api_module, "embedding_limiter", embedding_limiter)
     except Exception:
         return embedding_limiter
-

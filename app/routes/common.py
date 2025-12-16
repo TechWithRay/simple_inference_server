@@ -75,9 +75,7 @@ async def _run_work_with_client_cancel(  # noqa: D401
 ) -> Any:
     """Race a background executor task against client disconnect and timeout."""
 
-    disconnect_task: asyncio.Task[None] = asyncio.create_task(
-        _cancel_on_disconnect(request, cancel_event)
-    )
+    disconnect_task: asyncio.Task[None] = asyncio.create_task(_cancel_on_disconnect(request, cancel_event))
     try:
         done, _pending = await asyncio.wait(
             {work_task, disconnect_task},
