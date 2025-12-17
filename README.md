@@ -30,6 +30,10 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Add optional remote inference handler (HTTP/gRPC) implementing the same protocols for easy swapping.
 - Expand benchmarks to compare reference HF vs. high-performance variants under identical prompts/audio.
 - Keep default handlers dependency-light, but add TODO hooks for swapping in faster-whisper/CT2 and ONNX/TensorRT embeddings as optional backends.
+- High-ROI performance improvements (low dependency, mostly scheduler/config work):
+  - Add per-model concurrency budgets (or split into heavy/light pools) to reduce cross-model contention on a single GPU (e.g., keep embeddings/intent/rerank isolated from chat/vision/audio).
+  - Add prompt-length bucketing to chat batching (group by prompt token ranges) to reduce padding waste and improve throughput/tail latency.
+  - Propagate request tracing context into executor worker threads (e.g., via `contextvars.copy_context`) so logs inside threadpool work retain `request_id`.
 
 ## Quick start
 
