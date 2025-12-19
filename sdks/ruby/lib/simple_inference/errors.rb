@@ -22,6 +22,3 @@ module SimpleInference
     class DecodeError < Error; end
   end
 end
-
-
-

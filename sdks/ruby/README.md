@@ -167,6 +167,33 @@ response = client.chat_completions(
 pp response[:body]
 ```
 
+#### Streaming chat completions (SSE)
+
+For OpenAI-style streaming (`text/event-stream`), use `chat_completions_stream`. It yields parsed JSON events (Ruby `Hash`), so you can consume deltas incrementally:
+
+```ruby
+client.chat_completions_stream(
+  model: "gpt-4.1-mini",
+  messages: [{ "role" => "user", "content" => "Hello" }]
+) do |event|
+  delta = event.dig("choices", 0, "delta", "content")
+  print delta if delta
+end
+puts
+```
+
+If you prefer, it also returns an Enumerator:
+
+```ruby
+client.chat_completions_stream(model: "gpt-4.1-mini", messages: [...]).each do |event|
+  # ...
+end
+```
+
+Fallback behavior:
+
+- If the upstream service does **not** support streaming (for example, this repo's server currently returns `400` with `{"detail":"Streaming responses are not supported yet"}`), the SDK will **retry non-streaming** and yield a **single synthetic chunk** so your streaming consumer code can still run.
+
 #### Connect to any OpenAI-compatible endpoint
 
 For services that expose an OpenAI-compatible API (same paths and payloads), point `base_url` at that service and provide the correct token:
@@ -233,6 +260,3 @@ SIMPLE_INFERENCE_CLIENT = SimpleInference::Client.new(
   adapter:  SimpleInferenceHTTPXAdapter.new
 )
 ```
-
-
-
