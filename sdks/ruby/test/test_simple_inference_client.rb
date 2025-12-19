@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "stringio"
 require "test_helper"
 
 class TestSimpleInferenceClient < Minitest::Test
@@ -78,6 +79,64 @@ class TestSimpleInferenceClient < Minitest::Test
     end
     assert_equal 500, error.status
     assert_includes error.message, "boom"
+  end
+
+  def test_raises_http_error_uses_nested_error_message
+    adapter = Class.new do
+      def call(_env)
+        {
+          status: 401,
+          headers: { "content-type" => "application/json" },
+          body: '{"error":{"message":"nope"}}',
+        }
+      end
+    end.new
+
+    client = SimpleInference::Client.new(base_url: "http://example.com", adapter: adapter)
+
+    error = assert_raises(SimpleInference::Errors::HTTPError) do
+      client.embeddings(model: "foo", input: "bar")
+    end
+    assert_equal 401, error.status
+    assert_includes error.message, "nope"
+  end
+
+  def test_audio_transcriptions_uses_streaming_multipart_body
+    adapter = Class.new do
+      attr_reader :last_request, :last_body
+
+      def call(env)
+        @last_request = env
+        @last_body = env[:body].respond_to?(:read) ? env[:body].read : env[:body]
+
+        {
+          status: 200,
+          headers: { "content-type" => "application/json" },
+          body: "{}",
+        }
+      end
+    end.new
+
+    io = StringIO.new("abc".b)
+
+    client = SimpleInference::Client.new(base_url: "http://example.com", adapter: adapter)
+    client.audio_transcriptions(model: "whisper-1", file: { io: io, filename: "a.wav" })
+
+    assert_equal :post, adapter.last_request[:method]
+    assert_equal "http://example.com/v1/audio/transcriptions", adapter.last_request[:url]
+
+    content_type = adapter.last_request.dig(:headers, "Content-Type").to_s
+    assert_includes content_type, "multipart/form-data; boundary="
+
+    refute adapter.last_request[:body].is_a?(String)
+    assert adapter.last_request[:body].respond_to?(:read)
+
+    assert_includes adapter.last_body, %(name="model")
+    assert_includes adapter.last_body, "whisper-1"
+    assert_includes adapter.last_body, %(filename="a.wav")
+    assert_includes adapter.last_body, "abc"
+
+    assert_equal true, io.closed?
   end
 
   def test_chat_completions_stream_yields_parsed_sse_events

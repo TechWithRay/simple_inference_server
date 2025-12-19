@@ -426,6 +426,7 @@ module SimpleInference
       end
 
       body, headers = build_multipart_body(io, filename, form_fields)
+      headers["Transfer-Encoding"] = "chunked" if body.respond_to?(:size) && body.size.nil?
 
       request_env = {
         method: :post,
@@ -481,26 +482,115 @@ module SimpleInference
         "Content-Type" => "multipart/form-data; boundary=#{boundary}",
       }
 
-      body = +""
-
+      parts = []
       fields.each do |name, value|
-        body << "--#{boundary}\r\n"
-        body << %(Content-Disposition: form-data; name="#{name}"\r\n\r\n)
-        body << value.to_s
-        body << "\r\n"
+        parts << "--#{boundary}\r\n".b
+        parts << %(Content-Disposition: form-data; name="#{name}"\r\n\r\n).b
+        parts << value.to_s.b
+        parts << "\r\n".b
       end
 
-      body << "--#{boundary}\r\n"
-      body << %(Content-Disposition: form-data; name="file"; filename="#{filename}"\r\n)
-      body << "Content-Type: application/octet-stream\r\n\r\n"
+      parts << "--#{boundary}\r\n".b
+      parts << %(Content-Disposition: form-data; name="file"; filename="#{filename}"\r\n).b
+      parts << "Content-Type: application/octet-stream\r\n\r\n".b
+      parts << io
+      parts << "\r\n--#{boundary}--\r\n".b
 
-      while (chunk = io.read(16_384))
-        body << chunk
+      [MultipartStream.new(parts), headers]
+    end
+
+    class MultipartStream
+      def initialize(parts)
+        @parts = parts
+        @part_index = 0
+        @string_offset = 0
+        @size = nil
       end
 
-      body << "\r\n--#{boundary}--\r\n"
+      def read(length = nil, outbuf = nil)
+        return "".b if length.nil? && eof?
+        return nil if eof?
 
-      [body, headers]
+        out = outbuf ? outbuf.replace("".b) : +"".b
+
+        if length.nil?
+          while (chunk = read(16_384))
+            out << chunk
+          end
+          return out
+        end
+
+        while out.bytesize < length && !eof?
+          part = @parts.fetch(@part_index)
+
+          if part.is_a?(String)
+            remaining = part.bytesize - @string_offset
+            if remaining <= 0
+              advance_part!
+              next
+            end
+
+            take = [length - out.bytesize, remaining].min
+            out << part.byteslice(@string_offset, take)
+            @string_offset += take
+
+            advance_part! if @string_offset >= part.bytesize
+          else
+            chunk = part.read(length - out.bytesize)
+            if chunk.nil? || chunk.empty?
+              advance_part!
+              next
+            end
+
+            out << chunk
+          end
+        end
+
+        return nil if out.empty? && eof?
+
+        out
+      end
+
+      def size
+        @size ||= compute_size
+      end
+
+      private
+
+      def eof?
+        @part_index >= @parts.length
+      end
+
+      def advance_part!
+        @part_index += 1
+        @string_offset = 0
+      end
+
+      def compute_size
+        total = 0
+
+        @parts.each do |part|
+          if part.is_a?(String)
+            total += part.bytesize
+            next
+          end
+
+          return nil unless part.respond_to?(:size)
+
+          part_size = part.size
+          if part.respond_to?(:pos)
+            begin
+              part_size -= part.pos
+            rescue StandardError
+              # ignore pos errors
+            end
+          end
+
+          total += part_size
+        end
+
+        total
+      end
     end
 
     def handle_response(request_env, expect_json:, raise_on_http_error:)
@@ -523,7 +613,13 @@ module SimpleInference
 
         begin
           error_body = JSON.parse(body)
-          message = error_body["error"] || error_body["message"] || message
+          error_field = error_body["error"]
+          message =
+            if error_field.is_a?(Hash)
+              error_field["message"] || error_body["message"] || message
+            else
+              error_field || error_body["message"] || message
+            end
         rescue JSON::ParserError
           # fall back to generic message
         end

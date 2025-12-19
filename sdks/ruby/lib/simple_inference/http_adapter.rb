@@ -34,7 +34,21 @@ module SimpleInference
         end
 
         body = request[:body]
-        req.body = body if body
+        if body
+          if body.is_a?(String)
+            req.body = body
+          elsif body.respond_to?(:read)
+            req.body_stream = body
+            if body.respond_to?(:size) && (size = body.size)
+              req.content_length = size
+              req.delete("Transfer-Encoding")
+            else
+              req["Transfer-Encoding"] = "chunked"
+            end
+          else
+            req.body = body.to_s
+          end
+        end
 
         response = http.request(req)
 
@@ -75,7 +89,21 @@ module SimpleInference
         end
 
         body = request[:body]
-        req.body = body if body
+        if body
+          if body.is_a?(String)
+            req.body = body
+          elsif body.respond_to?(:read)
+            req.body_stream = body
+            if body.respond_to?(:size) && (size = body.size)
+              req.content_length = size
+              req.delete("Transfer-Encoding")
+            else
+              req["Transfer-Encoding"] = "chunked"
+            end
+          else
+            req.body = body.to_s
+          end
+        end
 
         status = nil
         response_headers = {}
