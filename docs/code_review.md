@@ -39,8 +39,8 @@ This document is a **high-level, human-readable** assessment of the current code
 ### Remaining risks / sharp edges (worth tracking)
 
 - **Context propagation into executor threads**:
-  - Request IDs are stored in `contextvars`, but context is not propagated into thread pool workers by default.
-  - Outcome: logs emitted *inside* model handlers may not include `request_id` even though API logs do.
+  - Request IDs are propagated into executor threads via `app.utils.executor_context.run_in_executor_with_context`.
+  - Ensure any new `run_in_executor` callsites use the helper so handler logs remain traceable.
 - **Best-effort cancellation**:
   - Cancelling the asyncio `Future` does not preempt a running kernel in PyTorch/Transformers; it only stops waiting and frees queue/limiter capacity.
   - Under sustained timeouts, work can still accumulate inside worker threads until they complete.
@@ -49,9 +49,7 @@ This document is a **high-level, human-readable** assessment of the current code
 
 ## Optimization opportunities (high ROI)
 
-- **Propagate tracing context to executors** (`contextvars.copy_context()` wrapper around `run_in_executor`) so handler logs can include `request_id`.
-- **Cache “signature inspection” results** in the chat route (whether a model accepts `cancel_event`) to avoid per-request `inspect.signature()` overhead.
-- **Optional: prompt-length bucketing** in chat batching to reduce padding waste for heterogeneous prompt lengths.
+- **Optional: prompt-length bucketing** in chat batching to reduce padding waste for heterogeneous prompts.
 - **Optional: rerank batching** if rerank becomes high-QPS (it currently runs as a straightforward executor call).
 
 ## Documentation alignment
