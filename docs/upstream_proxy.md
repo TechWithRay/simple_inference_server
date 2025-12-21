@@ -1,59 +1,59 @@
-# 上游代理模型（OpenAI / vLLM）
+# Upstream Proxy Models (OpenAI / vLLM)
 
-本服务可以作为“单一 OpenAI-compatible 网关”：你的应用只配置一个推理服务地址（本服务），但可以把部分 `model` 请求转发到上游 OpenAI 兼容服务（例如 **vLLM** 或 **OpenAI**），同时代理流量与本地流量的限流/队列相互隔离。
+This service can act as a **single OpenAI-compatible gateway**: your application only needs to configure one inference endpoint (this service), while specific `model` requests can be forwarded to an upstream OpenAI-compatible service (e.g. **vLLM** or **OpenAI**). Proxy traffic and local traffic are **rate-limited and queued independently**.
 
-## 你能得到什么
+## What you get
 
-- **显式路由**：只有在 `model_config` 里声明为“代理模型”的条目会被转发。
-- **原样透传**：代理路径不做严格字段校验，`tools`、`tool` role、厂商扩展字段等会被保留；上游响应也原样返回。
-- **独立流控**：OpenAI 代理与 vLLM 代理各自有独立的 limiter（不与本地 chat/embedding/vision/audio 限流互相影响）。
-- **流式透传**：代理 chat 支持 `stream=true`，会将上游的 SSE（`text/event-stream`）直接转发给客户端（本地模型仍保持不支持 streaming 的现状）。
+- **Explicit routing**: only entries declared as “proxy models” in `model_config` will be forwarded.
+- **Pass-through**: the proxy path does not enforce strict field validation. Fields like `tools`, `tool` role, vendor extensions, etc. are preserved, and upstream responses are returned as-is.
+- **Isolated flow control**: OpenAI proxy and vLLM proxy each has its own limiter (does not interfere with local chat/embedding/vision/audio limiting).
+- **Streaming pass-through**: proxied chat supports `stream=true` and forwards upstream SSE (`text/event-stream`) directly to the client (local models still do not support streaming).
 
-## 快速开始
+## Quick start
 
-1. 在 `configs/model_config.local.yaml` 添加代理模型条目（推荐使用 overlay，且该文件已在 `.gitignore` 中忽略）。
-2. `MODELS` 里填写代理模型的 **name**（若未写 `name`，则使用 `hf_repo_id` 作为模型 id）。
-3. 配置上游地址/鉴权（环境变量或单模型覆盖），启动服务即可。
+1. Add proxy model entries to `configs/model_config.local.yaml` (recommended as an overlay; this file is ignored by `.gitignore`).
+2. Put the proxy model **name** in `MODELS` (if `name` is not set, `hf_repo_id` is used as the model id).
+3. Configure the upstream URL / auth (via environment variables or per-model overrides), then start the service.
 
-## 关键概念：`name` vs `hf_repo_id`（非常重要）
+## Key concept: `name` vs `hf_repo_id` (very important)
 
-本服务加载模型时：
+When this service loads models:
 
-- **`name`（可选）**：客户端/应用看到的模型 ID（请求 `model` 字段）以及 `MODELS` 里使用的 ID。
-- **`hf_repo_id`（必填）**：
-  - 对本地模型：它就是 Hugging Face repo id。
-  - 对代理模型：我们复用该字段作为**上游 model id**（即网关转发给上游时使用的 `model`）。
+- **`name` (optional)**: the model ID your client/app uses (the request `model` field) and the ID used in `MODELS`.
+- **`hf_repo_id` (required)**:
+  - For local models: this is the Hugging Face repo id.
+  - For proxy models: we reuse this field as the **upstream model id** (i.e. the `model` we send to the upstream service).
 
-也就是说，代理模型的典型配置是：
+In other words, a typical proxy model configuration is:
 
-- 应用侧使用：`model: "<name>"`（例如 `proxy-chat`）
-- 网关转发上游使用：`model: "<hf_repo_id>"`（例如 `gpt-4o-mini`）
+- Client/app uses: `model: "<name>"` (e.g. `proxy-chat`)
+- Gateway forwards upstream using: `model: "<hf_repo_id>"` (e.g. `gpt-4o-mini`)
 
-## 支持的端点
+## Supported endpoints
 
 ### `POST /v1/chat/completions`
 
-- **本地模型**：保持现有行为（目前不支持 streaming；请求 schema 更严格；本地结构化输出可能会做校验与重试）。
-- **代理模型**：原样透传到上游 `/v1/chat/completions`。
-  - 如果 `stream=true`，网关会把上游 SSE 流转发给客户端。
+- **Local models**: keep current behavior (no streaming; stricter request schema; structured outputs may be validated/retried locally).
+- **Proxy models**: pass through to upstream `/v1/chat/completions`.
+  - If `stream=true`, the gateway forwards upstream SSE to the client.
 
 ### `POST /v1/embeddings`
 
-- **本地模型**：保持现有行为。
-- **代理模型**：原样透传到上游 `/v1/embeddings`（非流式）。
+- **Local models**: keep current behavior.
+- **Proxy models**: pass through to upstream `/v1/embeddings` (non-streaming).
 
-## 配置代理模型（YAML）
+## Configure proxy models (YAML)
 
-推荐在 `configs/model_config.local.yaml` 添加：
+Recommended: add entries in `configs/model_config.local.yaml`.
 
-### OpenAI chat 代理
+### OpenAI chat proxy
 
 ```yaml
 models:
   - name: "proxy-chat"
-    hf_repo_id: "gpt-4o-mini"  # 上游 model id
+    hf_repo_id: "gpt-4o-mini"  # upstream model id
     handler: "app.models.openai_proxy.OpenAIChatProxyModel"
-    # 可选覆盖（单模型粒度）：
+    # Optional per-model overrides:
     # upstream_base_url: "https://api.openai.com/v1"
     # upstream_api_key_env: "OPENAI_API_KEY"
     # upstream_timeout_sec: 60
@@ -61,7 +61,7 @@ models:
     #   X-My-Header: "foo"
 ```
 
-### vLLM chat 代理
+### vLLM chat proxy
 
 ```yaml
 models:
@@ -71,96 +71,94 @@ models:
     upstream_base_url: "http://127.0.0.1:8001/v1"
 ```
 
-启动时设置：
+At startup, set:
 
 - `MODELS=proxy-chat,heavy-qwen,...`
 
-## 代理 handler 一览
+## Proxy handler list
 
-- **OpenAI 上游**：
+- **OpenAI upstream**:
   - `app.models.openai_proxy.OpenAIChatProxyModel`
   - `app.models.openai_proxy.OpenAIEmbeddingProxyModel`
-- **vLLM 上游**：
+- **vLLM upstream**:
   - `app.models.vllm_proxy.VLLMChatProxyModel`
   - `app.models.vllm_proxy.VLLMEmbeddingProxyModel`
 
-## 单模型可用字段（会被传给 handler 的 `config=`）
+## Per-model fields (passed to the handler via `config=`)
 
-- **`upstream_base_url`**：上游 base URL，可写 `http://host` 或 `http://host/v1`，网关会规范化到 `/v1`。
-  - vLLM 代理如果没写该字段，则必须提供 `VLLM_BASE_URL`。
-- **`upstream_timeout_sec`**：上游请求超时（秒）。
-- **`upstream_api_key_env`**：从哪个环境变量读取 API key（推荐，避免把 key 写进 YAML）。
-- **`upstream_api_key`**：直接写 key（支持但不推荐提交到 git）。
-- **`upstream_headers`**：附加的自定义请求头（例如给 ingress/路由使用）。
-- **`skip_download`**：为 true 时，`AUTO_DOWNLOAD_MODELS` 和 `scripts/download_models.py` 会跳过该条目。
-  - 代理 handler 默认也会被自动跳过下载，这个字段更多是给其他非 HF handler 用。
+- **`upstream_base_url`**: upstream base URL. You may specify `http://host` or `http://host/v1`; the gateway will normalize it to `/v1`.
+  - For vLLM proxy models, if this field is not set, you must provide `VLLM_BASE_URL`.
+- **`upstream_timeout_sec`**: upstream request timeout (seconds).
+- **`upstream_api_key_env`**: which environment variable to read the API key from (recommended; avoids writing secrets into YAML).
+- **`upstream_api_key`**: inline API key (supported but not recommended to commit).
+- **`upstream_headers`**: additional custom headers (e.g. for ingress/routing).
+- **`skip_download`**: when true, `AUTO_DOWNLOAD_MODELS` and `scripts/download_models.py` will skip this entry.
+  - Proxy handlers are skipped by default anyway; this field is mainly for non-HF custom handlers.
 
-## 环境变量
+## Environment variables
 
 ### OpenAI
 
-- `OPENAI_BASE_URL`（默认 `https://api.openai.com/v1`）
-- `OPENAI_API_KEY`（可选）
-- `OPENAI_PROXY_TIMEOUT_SEC`（默认 `60`）
-- `OPENAI_PROXY_MAX_CONCURRENT` / `OPENAI_PROXY_MAX_QUEUE_SIZE` / `OPENAI_PROXY_QUEUE_TIMEOUT_SEC`（可选；不填则回退到全局 `MAX_CONCURRENT` / `MAX_QUEUE_SIZE` / `QUEUE_TIMEOUT_SEC`）
+- `OPENAI_BASE_URL` (default `https://api.openai.com/v1`)
+- `OPENAI_API_KEY` (optional)
+- `OPENAI_PROXY_TIMEOUT_SEC` (default `60`)
+- `OPENAI_PROXY_MAX_CONCURRENT` / `OPENAI_PROXY_MAX_QUEUE_SIZE` / `OPENAI_PROXY_QUEUE_TIMEOUT_SEC` (optional; if unset, falls back to global `MAX_CONCURRENT` / `MAX_QUEUE_SIZE` / `QUEUE_TIMEOUT_SEC`)
 
 ### vLLM
 
-- `VLLM_BASE_URL`（未在单模型里设置 `upstream_base_url` 时必填）
-- `VLLM_API_KEY`（可选）
-- `VLLM_PROXY_TIMEOUT_SEC`（默认 `60`）
-- `VLLM_PROXY_MAX_CONCURRENT` / `VLLM_PROXY_MAX_QUEUE_SIZE` / `VLLM_PROXY_QUEUE_TIMEOUT_SEC`（可选；不填则回退到全局）
+- `VLLM_BASE_URL` (required if `upstream_base_url` is not set per-model)
+- `VLLM_API_KEY` (optional)
+- `VLLM_PROXY_TIMEOUT_SEC` (default `60`)
+- `VLLM_PROXY_MAX_CONCURRENT` / `VLLM_PROXY_MAX_QUEUE_SIZE` / `VLLM_PROXY_QUEUE_TIMEOUT_SEC` (optional; if unset, falls back to global values)
 
-## 鉴权行为（重要）
+## Authentication behavior (important)
 
-网关发往上游的 `Authorization` 逻辑：
+Gateway `Authorization` behavior for upstream requests:
 
-- 如果服务端配置了 key（例如 `OPENAI_API_KEY`，或单模型 `upstream_api_key_env` / `upstream_api_key`），网关会使用：
+- If the gateway is configured with a key (e.g. `OPENAI_API_KEY`, or per-model `upstream_api_key_env` / `upstream_api_key`), it will send:
   - `Authorization: Bearer <key>`
-- 否则，如果客户端请求带了 `Authorization`，网关会**透传该 header**到上游。
+- Otherwise, if the client request includes `Authorization`, the gateway will **forward that header** to the upstream.
 
-安全建议：
+Security recommendation:
 
-- 如果你不希望客户端“自带上游 key”，请在网关侧固定配置 `OPENAI_API_KEY`（并对外加一层鉴权/网络隔离），不要把网关裸露在公网。
+- If you do not want clients to “bring their own upstream key”, configure `OPENAI_API_KEY` on the gateway side (and add your own auth/network isolation in front). Do not expose the gateway directly to the public Internet.
 
-## 独立限流与常见错误码
+## Independent limiting & common status codes
 
-代理流量使用独立 limiter：
+Proxy traffic uses separate limiters:
 
-- OpenAI 代理：`OPENAI_PROXY_*`
-- vLLM 代理：`VLLM_PROXY_*`
+- OpenAI proxy: `OPENAI_PROXY_*`
+- vLLM proxy: `VLLM_PROXY_*`
 
-常见返回：
+Common responses:
 
-- `429 Too Many Requests`（队列满或等待超时），并带 `Retry-After`
-- `503 Service Unavailable`（服务正在 shutdown/drain）
-- `504 Gateway Timeout`（上游请求超时）
-- `502 Bad Gateway`（上游 HTTP 层失败）
+- `429 Too Many Requests` (queue full or queue wait timeout), with `Retry-After`
+- `503 Service Unavailable` (service is shutting down / draining)
+- `504 Gateway Timeout` (upstream timeout)
+- `502 Bad Gateway` (upstream HTTP-layer failure)
 
-## warmup 与下载行为
+## Warmup & download behavior
 
-- 代理模型会被 **自动跳过下载**（避免将 `gpt-4o-mini` 之类当作 HF repo 去下载）。
-- 代理模型会被 **默认跳过 warmup**（避免默认启动就依赖上游可用/有 key）。
-- 如果你把代理模型加入 `WARMUP_ALLOWLIST`，warmup 会对上游做一次最小请求；若 warmup 开启且失败，可能触发启动 fail-fast（与本地模型一致）。
+- Proxy models are **automatically skipped for downloads** (so `gpt-4o-mini` is not treated as a Hugging Face repo to download).
+- Proxy models are **skipped by default in warmup** (so startup does not depend on upstream availability/keys).
+- If you add a proxy model to `WARMUP_ALLOWLIST`, warmup will send a minimal request to the upstream. If warmup is enabled and fails, startup may fail-fast (same behavior as local models).
 
-## 可观测性
+## Observability
 
-- `GET /v1/models` 会返回 `owned_by`（`local` / `openai` / `vllm`）
-- 日志：`chat_proxy_request`、`embedding_proxy_request` 会记录上游类型、状态码、耗时
+- `GET /v1/models` returns `owned_by` (`local` / `openai` / `vllm`)
+- Logs: `chat_proxy_request` and `embedding_proxy_request` record upstream type, status code, and latency
 
-## Ruby SDK 使用（可选）
+## Ruby SDK usage (optional)
 
-Ruby SDK 只需要把 `base_url` 指向本服务，然后把 `model` 设为代理模型的 `name` 即可。
+With the Ruby SDK, simply point `base_url` to this service and set `model` to the proxy model’s `name`.
 
-流式示例（代理模型会真正走 SSE；本地模型则 SDK 会自动 fallback 到非流式）：
+Streaming example (proxy models will use SSE; local models will automatically fall back to non-streaming in the SDK):
 
 ```ruby
 client.chat_completions_stream(
   model: "proxy-chat",
   messages: [{ "role" => "user", "content" => "hi" }]
 ) do |event|
-  # event 为解析后的 SSE JSON chunk
+  # event is the parsed SSE JSON chunk
 end
 ```
-
-

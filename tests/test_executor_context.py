@@ -24,4 +24,3 @@ def test_request_id_contextvars_propagate_into_executor_threads() -> None:
             resp = client.get("/_executor_request_id", headers={REQUEST_ID_HEADER: "req-123"})
             assert resp.status_code == status.HTTP_200_OK
             assert resp.json()["request_id"] == "req-123"
-

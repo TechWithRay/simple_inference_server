@@ -7,6 +7,7 @@ from concurrent.futures import Executor
 
 _MODEL_PARALLELISM_SEM_ATTR = "_model_parallelism_semaphore"
 
+
 def run_in_executor_with_context[T](
     loop: asyncio.AbstractEventLoop,
     executor: Executor | None,
@@ -76,4 +77,3 @@ async def run_in_executor_with_context_limited[T](
     fut = run_in_executor_with_context(loop, executor, func)
     fut.add_done_callback(lambda _fut: sem.release())
     return await asyncio.shield(fut)
-

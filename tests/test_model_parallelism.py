@@ -55,4 +55,3 @@ async def test_model_max_parallelism_gates_executor_submission() -> None:
         await asyncio.wait_for(t1, timeout=TASK_WAIT_TIMEOUT_SEC)
         await asyncio.wait_for(t2, timeout=TASK_WAIT_TIMEOUT_SEC)
         assert started2.is_set()
-

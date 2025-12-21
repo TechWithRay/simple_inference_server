@@ -16,6 +16,7 @@ QUEUE_SIZE = 16
 class _DummyModel:
     name = "dummy"
 
+
 def _make_item(loop: asyncio.AbstractEventLoop, prompt_tokens: int) -> _ChatBatchItem:
     fut: asyncio.Future[Any] = loop.create_future()
     return _ChatBatchItem(
@@ -76,4 +77,3 @@ async def test_prompt_bucketing_noop_when_no_bucket_has_multiple_items() -> None
     selected, leftover = batcher._bucket_by_prompt_length([a, b])
     assert selected == [a, b]
     assert leftover == []
-
