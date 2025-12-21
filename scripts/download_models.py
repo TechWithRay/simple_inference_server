@@ -28,7 +28,15 @@ def main() -> None:
     for item in cfg.get("models", []):
         repo_id = item["hf_repo_id"]
         name = item.get("name") or repo_id
+        handler = item.get("handler")
+        skip_download = bool(item.get("skip_download", False)) or (
+            isinstance(handler, str) and handler.startswith(("app.models.openai_proxy.", "app.models.vllm_proxy."))
+        )
         if requested is not None and name not in requested:
+            continue
+        if skip_download:
+            print(f"Skipping download for proxy model {name} ({repo_id})")
+            downloaded.add(name)
             continue
         print(f"Downloading {name} ({repo_id}) to {target_dir} ...")
         snapshot_download(

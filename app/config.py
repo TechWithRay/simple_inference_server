@@ -69,6 +69,29 @@ class Settings(BaseSettings):
     audio_max_workers: int = 1
 
     # -------------------------------------------------------------------------
+    # Upstream proxy (OpenAI / vLLM) settings
+    # -------------------------------------------------------------------------
+    # OpenAI-compatible upstream (e.g. OpenAI). Can be overridden per model via
+    # `upstream_base_url` in model_config.
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str = ""  # optional; if empty we may forward inbound Authorization
+    openai_proxy_timeout_sec: float = 60.0
+
+    openai_proxy_max_concurrent: int | None = None
+    openai_proxy_max_queue_size: int | None = None
+    openai_proxy_queue_timeout_sec: float | None = None
+
+    # vLLM OpenAI-compatible upstream (usually self-hosted). Can be overridden per model via
+    # `upstream_base_url` in model_config.
+    vllm_base_url: str = ""  # required if you configure vLLM proxy models
+    vllm_api_key: str = ""  # optional
+    vllm_proxy_timeout_sec: float = 60.0
+
+    vllm_proxy_max_concurrent: int | None = None
+    vllm_proxy_max_queue_size: int | None = None
+    vllm_proxy_queue_timeout_sec: float | None = None
+
+    # -------------------------------------------------------------------------
     # Embedding batching
     # -------------------------------------------------------------------------
     enable_embedding_batching: bool = True
@@ -230,6 +253,38 @@ class Settings(BaseSettings):
     @property
     def effective_vision_queue_timeout_sec(self) -> float:
         return self.vision_queue_timeout_sec if self.vision_queue_timeout_sec is not None else self.queue_timeout_sec
+
+    @property
+    def effective_openai_proxy_max_concurrent(self) -> int:
+        return self.openai_proxy_max_concurrent if self.openai_proxy_max_concurrent is not None else self.max_concurrent
+
+    @property
+    def effective_openai_proxy_max_queue_size(self) -> int:
+        return self.openai_proxy_max_queue_size if self.openai_proxy_max_queue_size is not None else self.max_queue_size
+
+    @property
+    def effective_openai_proxy_queue_timeout_sec(self) -> float:
+        return (
+            self.openai_proxy_queue_timeout_sec
+            if self.openai_proxy_queue_timeout_sec is not None
+            else self.queue_timeout_sec
+        )
+
+    @property
+    def effective_vllm_proxy_max_concurrent(self) -> int:
+        return self.vllm_proxy_max_concurrent if self.vllm_proxy_max_concurrent is not None else self.max_concurrent
+
+    @property
+    def effective_vllm_proxy_max_queue_size(self) -> int:
+        return self.vllm_proxy_max_queue_size if self.vllm_proxy_max_queue_size is not None else self.max_queue_size
+
+    @property
+    def effective_vllm_proxy_queue_timeout_sec(self) -> float:
+        return (
+            self.vllm_proxy_queue_timeout_sec
+            if self.vllm_proxy_queue_timeout_sec is not None
+            else self.queue_timeout_sec
+        )
 
     @property
     def effective_embedding_batch_max_size(self) -> int:

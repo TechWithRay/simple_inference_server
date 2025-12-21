@@ -53,7 +53,8 @@ async def list_models(registry: Annotated[Any, Depends(get_model_registry)]) -> 
     for name in registry.list_models():
         model = registry.get(name)
         dim = getattr(model, "dim", None)
-        models.append(ModelInfo(id=name, embedding_dimensions=dim))
+        owned_by = getattr(model, "owned_by", "local")
+        models.append(ModelInfo(id=name, owned_by=owned_by, embedding_dimensions=dim))
     return ModelsResponse(data=models)
 
 

@@ -128,6 +128,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - **Warmup behavior**: `ENABLE_WARMUP` (default `1`) enables a multi-capability warmup pass across embeddings / chat / vision / audio. When warmup is enabled the server **always fails fast** if any model warmup fails; use `WARMUP_ALLOWLIST` / `WARMUP_SKIPLIST` to scope coverage instead of turning off fail-fast.
 - Chat generation defaults: per-model `defaults` (temperature/top_p/max_tokens) in the config; request args override.
 - Chat structured outputs gate: per-model `supports_structured_outputs` in `configs/model_config.yaml` must be `true` to accept `response_format` requests (non-`text`).
+- **Upstream proxy models (OpenAI/vLLM)**: add “proxy models” in `configs/model_config.local.yaml` using handlers `app.models.openai_proxy.*` / `app.models.vllm_proxy.*`. Requests for those models are forwarded upstream (raw pass-through, including streaming for chat) and use independent proxy limiters (`OPENAI_PROXY_*`, `VLLM_PROXY_*`).
 - Embedding batching queue: `EMBEDDING_BATCH_QUEUE_SIZE` (default `64`, falls back to `MAX_QUEUE_SIZE`) bounds the per-model micro-batch queue to prevent unbounded RAM growth.
 - Audio path isolation: `AUDIO_MAX_CONCURRENT` / `AUDIO_MAX_QUEUE_SIZE` / `AUDIO_QUEUE_TIMEOUT_SEC` plus `AUDIO_MAX_WORKERS` size a dedicated limiter + thread pool for Whisper so it will not block chat/embedding traffic; default worker count is **1** and Whisper currently serializes work with a lock, so bumping workers only helps if you fork per-worker pipelines.
   - Handlers must be thread-safe if `AUDIO_MAX_WORKERS` > 1; otherwise wrap shared state with locks (Whisper handler already guards its pipeline but still serializes by default).
@@ -146,7 +147,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 
 ## Features
 
-- OpenAI-compatible embeddings and chat endpoints (non-streaming)
+- OpenAI-compatible embeddings and chat endpoints (local: non-streaming; proxy passthrough supports upstream streaming)
 - Vision input for Qwen3-VL (optional remote image fetch, see envs below)
 - Prometheus metrics, health checks, model listing
 - Micro-batching for embeddings, bounded concurrency and request guards
@@ -348,6 +349,52 @@ All benchmark scripts accept environment overrides (e.g., `BASE_URL`, `MODEL_NAM
 4. **Pre-download weights**: Run `uv run python scripts/download_models.py` (requires `MODELS` set) to populate `models/`, then rebuild/restart the service. The download script honors `MODELS` to fetch only selected models. Startup will fail if any requested model cannot be loaded.
 
 Unsupported or unregistered `model` values return `404 Model not found`. Be sure to add both the config entry and handler, then restart the service.
+
+## Upstream proxy models (vLLM / OpenAI)
+
+This server can act as a **single OpenAI-compatible gateway**: keep your app pointed at one base URL, but route selected `model` IDs to upstream OpenAI-compatible services (e.g. **vLLM** or **OpenAI**).
+
+For a more detailed guide (routing semantics, auth, limiter tuning, warmup/download behavior), see `docs/upstream_proxy.md`.
+
+### Configure a proxy model
+
+Add entries to `configs/model_config.local.yaml` (recommended; gitignored):
+
+```yaml
+models:
+  # Forward chat completions to OpenAI (or any OpenAI-compatible upstream)
+  - name: "proxy-chat"
+    hf_repo_id: "gpt-4o-mini"  # upstream model id
+    handler: "app.models.openai_proxy.OpenAIChatProxyModel"
+    # optional per-model overrides:
+    # upstream_base_url: "https://api.openai.com/v1"
+    # upstream_api_key_env: "OPENAI_API_KEY"
+
+  # Forward chat completions to a vLLM server
+  - name: "heavy-qwen"
+    hf_repo_id: "Qwen3-32B-Instruct"
+    handler: "app.models.vllm_proxy.VLLMChatProxyModel"
+    upstream_base_url: "http://localhost:8001/v1"
+```
+
+Then set `MODELS=proxy-chat,heavy-qwen,...` as usual.
+
+### Env vars
+
+- `OPENAI_BASE_URL` (default `https://api.openai.com/v1`)
+- `OPENAI_API_KEY` (optional; if empty, inbound `Authorization` may be forwarded)
+- `OPENAI_PROXY_TIMEOUT_SEC` (default `60`)
+- `OPENAI_PROXY_MAX_CONCURRENT`, `OPENAI_PROXY_MAX_QUEUE_SIZE`, `OPENAI_PROXY_QUEUE_TIMEOUT_SEC` (optional; fall back to global limits)
+
+- `VLLM_BASE_URL` (required for vLLM proxy models unless set per-model via `upstream_base_url`)
+- `VLLM_API_KEY` (optional)
+- `VLLM_PROXY_TIMEOUT_SEC` (default `60`)
+- `VLLM_PROXY_MAX_CONCURRENT`, `VLLM_PROXY_MAX_QUEUE_SIZE`, `VLLM_PROXY_QUEUE_TIMEOUT_SEC` (optional; fall back to global limits)
+
+### Notes
+
+- Proxy models are **skipped by auto-download** and **skipped by warmup by default** (so you don’t need upstream connectivity/keys just to start the server). To warm a proxy model, include it in `WARMUP_ALLOWLIST`.
+- The proxy path is a **raw pass-through**: unknown request fields (e.g. `tools`, vendor extensions) are forwarded upstream and upstream responses are returned as-is.
 
 ## Device selection
 

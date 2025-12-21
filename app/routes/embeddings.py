@@ -6,8 +6,9 @@ import threading
 import time
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.batching import BatchingService, EmbeddingBatchQueueTimeoutError
 from app.concurrency.limiter import (
@@ -19,6 +20,12 @@ from app.concurrency.limiter import (
     embedding_limiter,
     reset_queue_label,
     set_queue_label,
+)
+from app.concurrency.upstream_limiter import (
+    OPENAI_QUEUE_TIMEOUT_SEC,
+    VLLM_QUEUE_TIMEOUT_SEC,
+    openai_proxy_limiter,
+    vllm_proxy_limiter,
 )
 from app.config import settings
 from app.dependencies import get_model_registry
@@ -189,8 +196,7 @@ async def _run_embedding_generation(  # noqa: PLR0913 - explicit kwargs for clar
         ) from exc
 
 
-@router.post("/v1/embeddings", response_model=EmbeddingResponse)
-async def create_embeddings(  # noqa: PLR0912
+async def _create_embeddings_local(  # noqa: PLR0912
     req: EmbeddingRequest,
     registry: Annotated[ModelRegistry, Depends(get_model_registry)],
     request: Request,
@@ -272,6 +278,90 @@ async def create_embeddings(  # noqa: PLR0912
     usage_model = registry.get(req.model)
     usage = await _build_embedding_usage(usage_model, texts)
     return EmbeddingResponse(data=data, model=req.model, usage=usage)
+
+
+@router.post("/v1/embeddings")
+async def create_embeddings(  # noqa: PLR0912
+    request: Request,
+    payload: dict[str, Any],
+    registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+) -> Any:
+    model_name = payload.get("model")
+    if not isinstance(model_name, str) or not model_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing required field: model")
+
+    # Proxy path: forward raw payload upstream.
+    try:
+        model = registry.get(model_name)
+    except KeyError as exc:
+        record_request(model_name, "404")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Model {model_name} not found") from exc
+
+    if getattr(model, "is_proxy", False) and hasattr(model, "proxy_embeddings"):
+        start = time.perf_counter()
+        provider = getattr(model, "owned_by", None) or getattr(getattr(model, "upstream", None), "provider", None)
+        if provider == "openai":
+            limiter_cm = openai_proxy_limiter
+            retry_after = OPENAI_QUEUE_TIMEOUT_SEC
+        elif provider == "vllm":
+            limiter_cm = vllm_proxy_limiter
+            retry_after = VLLM_QUEUE_TIMEOUT_SEC
+        else:  # pragma: no cover
+            limiter_cm = openai_proxy_limiter
+            retry_after = OPENAI_QUEUE_TIMEOUT_SEC
+
+        try:
+            async with limiter_cm():
+                resp = await model.proxy_embeddings(request, payload)
+        except QueueFullError as exc:
+            record_request(model_name, "429")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Upstream proxy queue full",
+                headers={"Retry-After": str(int(retry_after))},
+            ) from exc
+        except QueueTimeoutError as exc:
+            record_request(model_name, "429")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Timed out waiting for upstream proxy slot",
+                headers={"Retry-After": str(int(retry_after))},
+            ) from exc
+        except ShuttingDownError as exc:
+            record_request(model_name, "503")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is shutting down"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            record_request(model_name, "504")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Upstream request timed out"
+            ) from exc
+        except httpx.HTTPError as exc:
+            record_request(model_name, "502")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Upstream request failed") from exc
+
+        latency = time.perf_counter() - start
+        observe_latency(model_name, latency)
+        record_request(model_name, str(resp.status_code))
+        logger.info(
+            "embedding_proxy_request",
+            extra={
+                "model": model_name,
+                "upstream": provider or "unknown",
+                "latency_ms": round(latency * 1000, 2),
+                "status": resp.status_code,
+            },
+        )
+        return resp
+
+    # Local path: validate with existing request schema.
+    try:
+        req = EmbeddingRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.errors()) from exc
+
+    return await _create_embeddings_local(req, registry, request)
 
 
 def _get_embedding_limiter() -> Any:

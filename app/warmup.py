@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeGuard, cast, runtime_checkable
 
+import httpx
 import torch
 from PIL import Image
 
@@ -36,6 +37,8 @@ from app.threadpool import (
 )
 
 logger = logging.getLogger(__name__)
+
+_HTTP_ERROR_THRESHOLD = 400
 
 type DeviceLike = torch.device | str | int | None
 type CudaDeviceLike = torch.device | str
@@ -200,7 +203,14 @@ def warm_up_models(registry: ModelRegistry) -> list[str]:
             continue
 
         model = registry.get(name)
-        capability_results = _warmup_single_model(name, model, config)
+        if getattr(model, "is_proxy", False):
+            # Avoid accidental network calls and/or needing API keys on default warmup.
+            if allowlist is None:
+                logger.info("warmup_skip", extra={"model": name, "reason": "proxy_model"})
+                continue
+            capability_results = _warmup_proxy_model(name, model)
+        else:
+            capability_results = _warmup_single_model(name, model, config)
 
         with _warmup_lock:
             if capability_results:
@@ -218,6 +228,77 @@ def warm_up_models(registry: ModelRegistry) -> list[str]:
         logger.info("warmup_completed")
 
     return get_failed_warmups()
+
+
+def _warmup_proxy_model(name: str, model: object) -> dict[str, bool]:
+    """Warm an upstream proxy model by doing a minimal upstream HTTP call.
+
+    This is only used when the model is explicitly allowlisted for warmup.
+    """
+
+    upstream = getattr(model, "upstream", None)
+    if upstream is None:
+        logger.warning("warmup_proxy_missing_upstream", extra={"model": name})
+        return {}
+
+    api_root = getattr(upstream, "api_root", None)
+    if not isinstance(api_root, str) or not api_root:
+        logger.warning("warmup_proxy_invalid_api_root", extra={"model": name})
+        return {}
+
+    timeout_sec = float(getattr(upstream, "timeout_sec", 60.0))
+    api_key = getattr(upstream, "api_key", None)
+    extra_headers = getattr(upstream, "extra_headers", None)
+
+    headers: dict[str, str] = {}
+    if isinstance(api_key, str) and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if isinstance(extra_headers, dict):
+        headers.update(
+            {k: v for k, v in extra_headers.items() if isinstance(k, str) and isinstance(v, str) and k and v}
+        )
+
+    model_id = getattr(model, "name", name)
+    capabilities = getattr(model, "capabilities", [])
+    if not isinstance(capabilities, list):
+        capabilities = []
+
+    results: dict[str, bool] = {}
+    with httpx.Client(timeout=timeout_sec) as client:
+        if "chat-completion" in capabilities:
+            try:
+                resp = client.post(
+                    f"{api_root}/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": model_id,
+                        "messages": [{"role": "user", "content": "warmup"}],
+                        "max_tokens": 1,
+                        "temperature": 0,
+                        "stream": False,
+                    },
+                )
+                results["chat-completion"] = resp.status_code < _HTTP_ERROR_THRESHOLD
+            except Exception as exc:  # pragma: no cover - network/runtime failure
+                logger.warning("warmup_proxy_chat_failed", extra={"model": name, "error": str(exc)})
+                results["chat-completion"] = False
+
+        if "text-embedding" in capabilities:
+            try:
+                resp = client.post(
+                    f"{api_root}/embeddings",
+                    headers=headers,
+                    json={
+                        "model": model_id,
+                        "input": ["warmup"],
+                    },
+                )
+                results["text-embedding"] = resp.status_code < _HTTP_ERROR_THRESHOLD
+            except Exception as exc:  # pragma: no cover - network/runtime failure
+                logger.warning("warmup_proxy_embed_failed", extra={"model": name, "error": str(exc)})
+                results["text-embedding"] = False
+
+    return results
 
 
 def _warmup_embedding_model(model: object, device: DeviceLike, config: WarmupConfig) -> bool:

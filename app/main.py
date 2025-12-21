@@ -26,6 +26,11 @@ from app.concurrency.audio_limiter import (
     wait_for_drain as wait_for_drain_audio,
 )
 from app.concurrency.limiter import start_accepting, stop_accepting, wait_for_drain
+from app.concurrency.upstream_limiter import (
+    start_accepting_upstream,
+    stop_accepting_upstream,
+    wait_for_drain_upstream,
+)
 from app.config import settings
 from app.logging_config import setup_logging
 from app.middleware import RequestIDMiddleware
@@ -165,6 +170,7 @@ def startup() -> tuple[ModelRegistry, BatchingService, ChatBatchingService]:
     setup_logging()
     start_accepting()
     start_accepting_audio()
+    start_accepting_upstream()
 
     config_path, model_allowlist, device_override = _load_model_config()
     cache_dir = os.environ["HF_HOME"]
@@ -365,9 +371,16 @@ def _download_models_if_enabled(config_path: str, allowlist: list[str] | None, c
         repo_id = item.get("hf_repo_id")
         name = item.get("name") or repo_id
         handler = item.get("handler")
+        skip_download = bool(item.get("skip_download", False)) or (
+            isinstance(handler, str) and handler.startswith(("app.models.openai_proxy.", "app.models.vllm_proxy."))
+        )
         if not repo_id or not handler:
             raise SystemExit("Each model requires 'hf_repo_id' and 'handler' in config")
         if requested is not None and name not in requested:
+            continue
+        if skip_download:
+            logger.info("Skipping download for proxy model %s (%s)", name, repo_id)
+            downloaded.append(name)
             continue
         logger.info("Downloading model %s (%s) to %s", name, repo_id, target_dir)
         try:
@@ -389,8 +402,10 @@ async def shutdown(
 ) -> None:
     stop_accepting()
     stop_accepting_audio()
+    stop_accepting_upstream()
     await wait_for_drain()
     await wait_for_drain_audio()
+    await wait_for_drain_upstream()
     if batching_service is not None:
         await batching_service.stop()
         state.batching_service = None
@@ -400,11 +415,16 @@ async def shutdown(
     if registry is not None:
         for model in registry.models.values():
             close_fn = getattr(model, "close", None)
-            if callable(close_fn):
-                try:
-                    close_fn()
-                except Exception:  # pragma: no cover - best-effort shutdown
-                    logger.warning("model_close_failed", extra={"model": getattr(model, "name", "unknown")})
+            aclose_fn = getattr(model, "aclose", None)
+            fn = aclose_fn if callable(aclose_fn) else close_fn
+            if not callable(fn):
+                continue
+            try:
+                result = fn()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # pragma: no cover - best-effort shutdown
+                logger.warning("model_close_failed", extra={"model": getattr(model, "name", "unknown")})
     state.warmup_status = WarmupStatus()
     shutdown_count_executor()
     shutdown_executors()

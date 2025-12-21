@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -62,10 +63,11 @@ class ModelRegistry:
                 raise ValueError(f"Model '{name}' is missing a handler in config")
             handler_factory = self._import_handler(handler_path)
 
-            model = handler_factory(repo, self.device)
+            model = self._instantiate_handler(handler_factory, repo, self.device, item)
             # Feature gates (config-driven). These are read by routes to decide
             # whether to accept certain OpenAI-compatible request parameters.
-            cast(Any, model).supports_structured_outputs = supports_structured_outputs
+            if not getattr(model, "is_proxy", False):
+                cast(Any, model).supports_structured_outputs = supports_structured_outputs
             # Optional per-model generation defaults (e.g., temperature, top_p, max_tokens) for chat-capable models only.
             if gen_defaults and "chat-completion" in getattr(model, "capabilities", []):
                 cast(Any, model).generation_defaults = gen_defaults
@@ -90,6 +92,33 @@ class ModelRegistry:
             return handler
         except AttributeError as exc:  # pragma: no cover - defensive
             raise ImportError(f"Handler class {class_name} not found in {module_path}") from exc
+
+    def _instantiate_handler(
+        self,
+        handler_factory: Callable[..., Any],
+        repo: str,
+        device: str,
+        item_cfg: dict[str, Any],
+    ) -> Any:
+        """Instantiate handler with backward-compatible signature detection.
+
+        Existing handlers accept `(hf_repo_id, device)`.
+        Proxy / advanced handlers may additionally accept `config=...`.
+        """
+
+        try:
+            sig = inspect.signature(handler_factory)
+        except (TypeError, ValueError):  # pragma: no cover - best effort
+            return handler_factory(repo, device)
+
+        if "config" in sig.parameters:
+            return handler_factory(repo, device, config=item_cfg)
+
+        # Some factories may accept a third positional arg.
+        if len(sig.parameters) >= 3:
+            return handler_factory(repo, device, item_cfg)
+
+        return handler_factory(repo, device)
 
     def get(self, name: str) -> Any:
         if name not in self.models:
