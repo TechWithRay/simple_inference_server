@@ -55,6 +55,6 @@ This document is a **high-level, human-readable** assessment of the current code
 ## Documentation alignment
 
 - `README.md`, `docs/perf_testing.md`, and `docs/upstream_proxy.md` reflect the current runtime behavior and configuration knobs.
-- Environment example: the repo ships `env.example` (copy to `.env`) to keep configuration discoverable without committing secrets.
+- Environment example: the repo ships `env` (copy to `.env`) to keep configuration discoverable without committing secrets.
 
 If you make meaningful architectural changes (limiters, batching semantics, cancellation behavior), please update this document and the README together so operators don’t have to “learn by reading code.”

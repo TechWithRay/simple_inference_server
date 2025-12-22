@@ -6,6 +6,7 @@ Import `settings` singleton from this module instead of using os.getenv() direct
 
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
 
 from pydantic import field_validator
@@ -15,8 +16,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
+    _ENV_FILES: tuple[str, str] | None = ("env", ".env")
+    if "pytest" in sys.modules or any("pytest" in arg for arg in sys.argv):
+        # Keep tests hermetic: do not implicitly load repo-local env files.
+        _ENV_FILES = None
+
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILES,
         env_file_encoding="utf-8",
         env_ignore_empty=True,
         extra="ignore",
