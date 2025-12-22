@@ -66,6 +66,10 @@ CHAT_MAX_NEW_TOKENS=2048
 CHAT_GENERATE_TIMEOUT_SEC=60
 CHAT_PREPARE_TIMEOUT_SEC=10
 CHAT_OOM_COOLDOWN_SEC=300
+CHAT_STRUCTURED_OUTPUT_MAX_RETRIES=1
+# When enabled, structured output coercion/validation failures become warnings and
+# the raw model output is returned instead of failing the request (default: 0).
+CHAT_STRUCTURED_OUTPUT_WARN_ONLY=0
 
 # Chat batch queue ageing / requeue controls
 CHAT_QUEUE_MAX_WAIT_MS=2000

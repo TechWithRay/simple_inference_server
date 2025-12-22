@@ -683,6 +683,23 @@ async def _create_chat_completions_local(  # noqa: PLR0912, PLR0915
                 break
             except ValueError as exc:
                 if attempt >= max_retries:
+                    if settings.chat_structured_output_warn_only:
+                        output_preview = generation.text
+                        if len(output_preview) > _STRUCTURED_OUTPUT_ERROR_MAX_CHARS:
+                            output_preview = f"{output_preview[:_STRUCTURED_OUTPUT_ERROR_MAX_CHARS]}..."
+                        logger.warning(
+                            "chat_structured_output_validation_failed",
+                            extra={
+                                "model": req.model,
+                                "response_format_type": getattr(response_format, "type", None),
+                                "attempt": attempt + 1,
+                                "max_retries": max_retries,
+                                "error": str(exc),
+                                "output_preview": output_preview,
+                            },
+                        )
+                        break
+
                     record_chat_request(req.model, "500")
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -1,4 +1,5 @@
 import threading
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -272,6 +273,67 @@ def test_chat_completion_response_format_json_schema_strict_validation_error() -
         },
     )
     assert resp.status_code >= HTTP_SERVER_ERROR
+
+
+def test_chat_completion_response_format_warn_only_allows_invalid_json(monkeypatch: Any) -> None:
+    monkeypatch.setenv("CHAT_STRUCTURED_OUTPUT_WARN_ONLY", "true")
+    client = TestClient(
+        create_app(
+            {
+                "dummy-chat": FixedResponseChatModel(
+                    ["chat-completion", "vision"],
+                    response_text="not json",
+                    supports_structured_outputs=True,
+                )
+            }
+        )
+    )
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "dummy-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {"type": "json_object"},
+        },
+    )
+    assert resp.status_code == HTTP_OK
+    payload = resp.json()
+    assert payload["choices"][0]["message"]["content"] == "not json"
+
+
+def test_chat_completion_response_format_warn_only_allows_schema_mismatch(monkeypatch: Any) -> None:
+    monkeypatch.setenv("CHAT_STRUCTURED_OUTPUT_WARN_ONLY", "true")
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    client = TestClient(
+        create_app(
+            {
+                "dummy-chat": FixedResponseChatModel(
+                    ["chat-completion", "vision"],
+                    response_text='{"answer":1}',
+                    supports_structured_outputs=True,
+                )
+            }
+        )
+    )
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "dummy-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema, "strict": True},
+            },
+        },
+    )
+    assert resp.status_code == HTTP_OK
+    payload = resp.json()
+    assert payload["choices"][0]["message"]["content"] == '{"answer":1}'
 
 
 PROMPT_TOKENS = 3

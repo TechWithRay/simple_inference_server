@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     # When response_format requests JSON / JSON Schema, we can optionally retry
     # generation a small number of times if the model outputs invalid JSON.
     chat_structured_output_max_retries: int = 1
+    # If true, do not fail the request when structured output coercion/validation
+    # fails after retries. Instead, log a warning and return the raw model output.
+    #
+    # Default is False to preserve the current behavior (fail with 5xx).
+    chat_structured_output_warn_only: bool = False
 
     # -------------------------------------------------------------------------
     # Input/output limits
