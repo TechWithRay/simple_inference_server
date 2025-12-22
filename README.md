@@ -30,10 +30,6 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Add optional remote inference handler (HTTP/gRPC) implementing the same protocols for easy swapping.
 - Expand benchmarks to compare reference HF vs. high-performance variants under identical prompts/audio.
 - Keep default handlers dependency-light, but add TODO hooks for swapping in faster-whisper/CT2 and ONNX/TensorRT embeddings as optional backends.
-- High-ROI performance improvements (low dependency, mostly scheduler/config work):
-  - Add per-model concurrency budgets (or split into heavy/light pools) to reduce cross-model contention on a single GPU (e.g., keep embeddings/intent/rerank isolated from chat/vision/audio).
-  - Add prompt-length bucketing to chat batching (group by prompt token ranges) to reduce padding waste and improve throughput/tail latency.
-  - Propagate request tracing context into executor worker threads (e.g., via `contextvars.copy_context`) so logs inside threadpool work retain `request_id`.
 
 ## Quick start
 
@@ -136,6 +132,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 - Request timeouts: `EMBEDDING_GENERATE_TIMEOUT_SEC` (default `60`) and `AUDIO_PROCESS_TIMEOUT_SEC` (default `180`) bound executor work to keep queues from clogging under hung models.
 - **Cancellation and status codes** (best-effort): for embeddings, chat, and audio we race executor work against client disconnect and a hard timeout. Timeouts surface as `504 Gateway Timeout`; client-side aborts (disconnect or cancel) surface as `499 Client Closed Request`. Model kernels are not preempted—timeouts/cancellations only cut off responses and free queue capacity—so keep `MAX_CONCURRENT` / timeouts conservative.
 - Chat batching (text-only): `ENABLE_CHAT_BATCHING` (default `1`), `CHAT_BATCH_WINDOW_MS` (default `10` ms), `CHAT_BATCH_MAX_SIZE` (default `8`), `CHAT_BATCH_QUEUE_SIZE` (default `64`), `CHAT_MAX_PROMPT_TOKENS` (default `4096`), `CHAT_MAX_NEW_TOKENS` (default `2048`), `CHAT_BATCH_ALLOW_VISION` (default `0` keeps vision models on an unbatched path).
+- Chat prompt-length bucketing: `CHAT_BATCH_PROMPT_BUCKETING` (default `0`) groups batched requests by prompt token ranges to reduce padding waste; `CHAT_BATCH_PROMPT_BUCKET_SIZE_TOKENS` (default `256`) sets the bucket width.
 - Chat scheduler tuning: `CHAT_COUNT_MAX_WORKERS` (token-count threads, default `2`), `CHAT_REQUEUE_RETRIES` (default `3`) and `CHAT_REQUEUE_BASE_DELAY_MS` (default `5`) control requeue backoff to reduce peak 429 errors.
 - Chat cancellation: the chat path now shares the same cancellation helper as embeddings/audio, so `499` / `504` behavior and metrics are aligned across all three capabilities. As with other paths, cancellation is cooperative at the application level only.
 - Embedding usage token counting: by default the embeddings endpoint performs a second tokenizer pass per request to populate `usage.prompt_tokens` in the OpenAI-style response. Set `EMBEDDING_USAGE_DISABLE_TOKEN_COUNT=1` to skip this work (usage fields will report `prompt_tokens=0`) in high-QPS scenarios where you do not need per-request token accounting.
@@ -260,7 +257,7 @@ Embedding cache: repeated inputs are served from an in-memory LRU keyed by the f
 
 - **Concurrency gate**: `MAX_CONCURRENT` caps how many requests may run model forwards at once via the global limiter. Per-capability worker counts (`EMBEDDING_MAX_WORKERS`, `CHAT_MAX_WORKERS`, `VISION_MAX_WORKERS`, `AUDIO_MAX_WORKERS`) size the underlying thread pools but do **not** bypass the limiter. For most deployments, keep each `*_MAX_WORKERS` ≤ `MAX_CONCURRENT` to avoid oversubscribing CPU/GPU threads; on a single GPU/MPS start with `MAX_CONCURRENT=1–2` and small worker pools, and only raise them if throughput improves while p99 stays acceptable.
 - **Micro-batching**: keep `ENABLE_EMBEDDING_BATCHING=1`; tune `EMBEDDING_BATCH_WINDOW_MS` (e.g., 4–10 ms; default `6` ms) and `EMBEDDING_BATCH_WINDOW_MAX_SIZE` (8–16) to trade a few ms of queueing for higher throughput. Set `EMBEDDING_BATCH_WINDOW_MS=0` to disable coalescing.
-- **Chat batching (text-only)**: `ENABLE_CHAT_BATCHING=1` by default; tune `CHAT_BATCH_WINDOW_MS` (e.g., 4–10 ms) and `CHAT_BATCH_MAX_SIZE` (4–8). Guards: `CHAT_MAX_PROMPT_TOKENS` (default 4096) and `CHAT_MAX_NEW_TOKENS` (default 2048). Vision models stay on the unbatched path unless `CHAT_BATCH_ALLOW_VISION=1`.
+- **Chat batching (text-only)**: `ENABLE_CHAT_BATCHING=1` by default; tune `CHAT_BATCH_WINDOW_MS` (e.g., 4–10 ms) and `CHAT_BATCH_MAX_SIZE` (4–8). Guards: `CHAT_MAX_PROMPT_TOKENS` (default 4096) and `CHAT_MAX_NEW_TOKENS` (default 2048). Vision models stay on the unbatched path unless `CHAT_BATCH_ALLOW_VISION=1`. Enable `CHAT_BATCH_PROMPT_BUCKETING=1` to group requests by prompt length and reduce padding waste (tune bucket width via `CHAT_BATCH_PROMPT_BUCKET_SIZE_TOKENS`).
 - **Chat token counting**: defaults to a dedicated pool (`CHAT_COUNT_USE_CHAT_EXECUTOR=0`). Flip to `1` only if you want counting to share chat worker threads and can tolerate possible head-of-line blocking.
 - **Queueing**: `MAX_QUEUE_SIZE` controls how many requests can wait. Too large increases tail latency; too small yields 429s. Set per your SLA.
 - **Warmup**: keep `ENABLE_WARMUP=1`; for heavier models raise `WARMUP_STEPS` / `WARMUP_BATCH_SIZE` (e.g., 2–3 steps, batch 4–8). Use `WARMUP_VRAM_BUDGET_MB` / `WARMUP_VRAM_PER_WORKER_MB` to bound warmup fan-out on tighter GPUs; restart after changing models or devices.

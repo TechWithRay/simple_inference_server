@@ -49,7 +49,6 @@ This document is a **high-level, human-readable** assessment of the current code
 
 ## Optimization opportunities (high ROI)
 
-- **Optional: prompt-length bucketing** in chat batching to reduce padding waste for heterogeneous prompts.
 - **Optional: rerank batching** if rerank becomes high-QPS (it currently runs as a straightforward executor call).
 
 ## Documentation alignment

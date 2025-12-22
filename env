@@ -71,6 +71,10 @@ CHAT_STRUCTURED_OUTPUT_MAX_RETRIES=1
 # the raw model output is returned instead of failing the request (default: 0).
 CHAT_STRUCTURED_OUTPUT_WARN_ONLY=0
 
+# Chat prompt-length bucketing (reduces padding waste for heterogeneous prompts)
+CHAT_BATCH_PROMPT_BUCKETING=0
+CHAT_BATCH_PROMPT_BUCKET_SIZE_TOKENS=256
+
 # Chat batch queue ageing / requeue controls
 CHAT_QUEUE_MAX_WAIT_MS=2000
 CHAT_REQUEUE_RETRIES=3
