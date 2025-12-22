@@ -105,7 +105,7 @@ Rails.logger.info("Available models: #{models[:body].inspect}")
 If your Simple Inference Server is configured with **upstream proxy models** (so it forwards certain `model` IDs to vLLM/OpenAI), the Ruby SDK usage is unchanged:
 
 - Use the gateway as the single `base_url`.
-- Set `model:` to the proxy model name (the `name` in `configs/model_config.local.yaml`).
+- Set `model:` to the proxy model name (the `name` in `models.local.yaml` / `models.local.yml`).
 - If the upstream supports streaming, `chat_completions_stream` will stream SSE events end-to-end through the gateway.
 
 ### API methods

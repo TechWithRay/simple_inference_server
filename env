@@ -21,7 +21,7 @@ MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507
 # Example: add Whisper ASR (requires ffmpeg on PATH):
 # MODELS=BAAI/bge-m3,Qwen/Qwen3-4B-Instruct-2507,openai/whisper-tiny
 AUTO_DOWNLOAD_MODELS=1
-MODEL_CONFIG_PATH=configs/model_config.yaml
+MODEL_CONFIG_PATH=models.yaml
 HF_HOME=./models
 
 # -----------------------------------------------------------------------------

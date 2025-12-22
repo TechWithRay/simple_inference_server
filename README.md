@@ -121,14 +121,14 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 
 ## Configuration highlights
 
-- `MODELS` (required): comma-separated model IDs from `configs/model_config.yaml` (plus optional local overlay; see next bullet).
-- Local model config overlay (optional): put overrides/additions in `configs/model_config.local.yaml` to avoid editing the git-tracked `configs/model_config.yaml`. Matching entries override by `name` (preferred) or `hf_repo_id`; new entries are appended.
+- `MODELS` (required): comma-separated model IDs from `models.yaml` (plus optional local overlay; see next bullet).
+- Local model config overlay (optional): put overrides/additions in `models.local.yaml` (or `models.local.yml`) to avoid editing the git-tracked `models.yaml`. Matching entries override by `name` (preferred) or `hf_repo_id`; new entries are appended.
 - `MODEL_DEVICE`: `cpu` | `mps` | `cuda` | `cuda:<idx>` | `auto` (default).
 - `AUTO_DOWNLOAD_MODELS` (default `1`): download selected models on startup; set to `0` to require pre-downloaded weights. Startup exits on download/load failure.
 - **Warmup behavior**: `ENABLE_WARMUP` (default `1`) enables a multi-capability warmup pass across embeddings / chat / vision / audio. When warmup is enabled the server **always fails fast** if any model warmup fails; use `WARMUP_ALLOWLIST` / `WARMUP_SKIPLIST` to scope coverage instead of turning off fail-fast.
 - Chat generation defaults: per-model `defaults` (temperature/top_p/max_tokens) in the config; request args override.
-- Chat structured outputs gate: per-model `supports_structured_outputs` in `configs/model_config.yaml` must be `true` to accept `response_format` requests (non-`text`).
-- **Upstream proxy models (OpenAI/vLLM)**: add “proxy models” in `configs/model_config.local.yaml` using handlers `app.models.openai_proxy.*` / `app.models.vllm_proxy.*`. Requests for those models are forwarded upstream (raw pass-through, including streaming for chat) and use independent proxy limiters (`OPENAI_PROXY_*`, `VLLM_PROXY_*`).
+- Chat structured outputs gate: per-model `supports_structured_outputs` in `models.yaml` must be `true` to accept `response_format` requests (non-`text`).
+- **Upstream proxy models (OpenAI/vLLM)**: add “proxy models” in `models.local.yaml` / `models.local.yml` using handlers `app.models.openai_proxy.*` / `app.models.vllm_proxy.*`. Requests for those models are forwarded upstream (raw pass-through, including streaming for chat) and use independent proxy limiters (`OPENAI_PROXY_*`, `VLLM_PROXY_*`).
 - Embedding batching queue: `EMBEDDING_BATCH_QUEUE_SIZE` (default `64`, falls back to `MAX_QUEUE_SIZE`) bounds the per-model micro-batch queue to prevent unbounded RAM growth.
 - Audio path isolation: `AUDIO_MAX_CONCURRENT` / `AUDIO_MAX_QUEUE_SIZE` / `AUDIO_QUEUE_TIMEOUT_SEC` plus `AUDIO_MAX_WORKERS` size a dedicated limiter + thread pool for Whisper so it will not block chat/embedding traffic; default worker count is **1** and Whisper currently serializes work with a lock, so bumping workers only helps if you fork per-worker pipelines.
   - Handlers must be thread-safe if `AUDIO_MAX_WORKERS` > 1; otherwise wrap shared state with locks (Whisper handler already guards its pipeline but still serializes by default).
@@ -158,7 +158,7 @@ OpenAI-compatible inference API for small/edge models. Ships ready-to-run with F
 
 ## Built-in models (catalog)
 
-All supported models are defined in `configs/model_config.yaml` (kept as the catalog). Pick which ones to load at runtime via `MODELS` / `--models`.
+All supported models are defined in `models.yaml` (kept as the catalog). Pick which ones to load at runtime via `MODELS` / `--models`.
 
 | id (`model` param) | HF repo | Handler | `supports_structured_outputs` |
 | --- | --- | --- | --- |
@@ -184,14 +184,14 @@ All supported models are defined in `configs/model_config.yaml` (kept as the cat
 | `openai/whisper-tiny` | `openai/whisper-tiny` | `app.models.whisper.WhisperASR` | n/a |
 | `openai/whisper-tiny.en` | `openai/whisper-tiny.en` | `app.models.whisper.WhisperASR` | n/a |
 
-FP8 Qwen3-VL models require `accelerate` (added to dependencies). If you prefer non-quantized weights, swap the repos to `Qwen/Qwen3-VL-4B-Instruct` or `Qwen/Qwen3-VL-2B-Instruct` in `configs/model_config.yaml`; all other logic remains the same.
+FP8 Qwen3-VL models require `accelerate` (added to dependencies). If you prefer non-quantized weights, swap the repos to `Qwen/Qwen3-VL-4B-Instruct` or `Qwen/Qwen3-VL-2B-Instruct` in `models.yaml`; all other logic remains the same.
 
-Per-model generation defaults (temperature / top_p / max_tokens) can be set in `configs/model_config.yaml` under a `defaults` block; request parameters override these defaults.
+Per-model generation defaults (temperature / top_p / max_tokens) can be set in `models.yaml` under a `defaults` block; request parameters override these defaults.
 
 ## API endpoints
 
 - `POST /v1/embeddings`: OpenAI-compatible embeddings API. Body:
-  - `model` (string): one of the names in `configs/model_config.yaml`
+  - `model` (string): one of the names in `models.yaml`
   - `input` (string or array of strings): text to embed
   - `encoding_format` (optional, default `"float"`): only `"float"` is supported
 - `POST /v1/chat/completions`: OpenAI-compatible chat API (non-streaming). Body:
@@ -200,7 +200,7 @@ Per-model generation defaults (temperature / top_p / max_tokens) can be set in `
   - `max_tokens` (optional; falls back to per-model default then env `MAX_NEW_TOKENS` → 512)
   - `temperature`, `top_p`, `stop`, `user` as in OpenAI; `n` must be 1; `stream` is not yet supported
   - `response_format` (optional): OpenAI-style structured outputs (gated per model; best-effort)
-    - Requires `supports_structured_outputs: true` for the selected model in `configs/model_config.yaml` (otherwise 400).
+    - Requires `supports_structured_outputs: true` for the selected model in `models.yaml` (otherwise 400).
     - `{"type":"json_object"}`: server enforces valid JSON object output
     - `{"type":"json_schema","json_schema":{"name":"...","schema":{...},"strict":true}}`: server enforces valid JSON + validates against the provided JSON Schema when `strict=true`
     - If the model output cannot be coerced/validated after `CHAT_STRUCTURED_OUTPUT_MAX_RETRIES` retries, the request fails with a 5xx error.
@@ -344,7 +344,7 @@ All benchmark scripts accept environment overrides (e.g., `BASE_URL`, `MODEL_NAM
 ## Adding a new model
 
 1. **Implement a handler**: Create `app/models/<your_model>.py` implementing `EmbeddingModel` (see `hf_embedding.py` for reference). Set `capabilities` on the handler (e.g., `["text-embedding"]`). Use `cache_dir` pointing to `models/` (or `HF_HOME` fallback) and `local_files_only=True`.
-2. **Add config entry**: Add to `configs/model_config.local.yaml` (recommended for local-only changes) with fields `hf_repo_id` and `handler` (fully qualified import path, e.g., `app.models.my_model.MyModelEmbedding`; `name` is optional). If you intend to commit a new built-in model, update `configs/model_config.yaml` instead.
+2. **Add config entry**: Add to `models.local.yaml` / `models.local.yml` (recommended for local-only changes) with fields `hf_repo_id` and `handler` (fully qualified import path, e.g., `app.models.my_model.MyModelEmbedding`; `name` is optional). If you intend to commit a new built-in model, update `models.yaml` instead.
 3. **Select models to load at runtime**: Set `MODELS` (comma-separated) or pass `--models` to `scripts/run_dev.py`. This is required; the server will exit if not provided.
 4. **Pre-download weights**: Run `uv run python scripts/download_models.py` (requires `MODELS` set) to populate `models/`, then rebuild/restart the service. The download script honors `MODELS` to fetch only selected models. Startup will fail if any requested model cannot be loaded.
 
@@ -358,7 +358,7 @@ For a more detailed guide (routing semantics, auth, limiter tuning, warmup/downl
 
 ### Configure a proxy model
 
-Add entries to `configs/model_config.local.yaml` (recommended; gitignored):
+Add entries to `models.local.yaml` / `models.local.yml` (recommended; gitignored):
 
 ```yaml
 models:
@@ -410,7 +410,7 @@ Then set `MODELS=proxy-chat,heavy-qwen,...` as usual.
   - `POST /embeddings`: non-OpenAI-compatible embeddings API
 - OpenAI-style streaming chat completions (SSE/chunked responses)
 - Remote image telemetry / tuning: remote fetch is guardrailed with host allowlists, private IP blocking, MIME sniffing, size caps, and redirect checks. Counters at `remote_image_rejections_total{reason}` capture rejects by reason (size/mime/host/private_ip/disabled/allowlist_missing).
-- Rerank: `/v1/rerank` is implemented but no rerank model is included in `configs/model_config.yaml` by default; pick a reranker model and add a config entry, then consider batching/caching if you need high QPS.
+- Rerank: `/v1/rerank` is implemented but no rerank model is included in `models.yaml` by default; pick a reranker model and add a config entry, then consider batching/caching if you need high QPS.
 - Test additions: vision chat path, non-batch chat serialization, prompt-length guard, warmup OOM surfacing.
 
 ## License

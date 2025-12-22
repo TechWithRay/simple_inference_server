@@ -6,7 +6,7 @@ from typing import Final
 
 import uvicorn
 
-DEFAULT_MODEL_CONFIG: Final = "configs/model_config.yaml"
+DEFAULT_MODEL_CONFIG: Final = "models.yaml"
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default=os.getenv("MODEL_CONFIG", DEFAULT_MODEL_CONFIG),
+        default=os.getenv("MODEL_CONFIG_PATH") or os.getenv("MODEL_CONFIG") or DEFAULT_MODEL_CONFIG,
         help="Path to model config file",
     )
     parser.add_argument(
@@ -33,6 +33,8 @@ def main() -> None:
     models_env = args.models or os.getenv("MODELS")
     if not models_env:
         raise SystemExit("No models specified. Set --models or MODELS env (comma-separated).")
+    os.environ["MODEL_CONFIG_PATH"] = args.config
+    # Back-compat for older scripts/tests that used MODEL_CONFIG.
     os.environ["MODEL_CONFIG"] = args.config
     os.environ["MODEL_DEVICE"] = args.device
     os.environ["MODELS"] = models_env

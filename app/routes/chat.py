@@ -634,7 +634,7 @@ async def _create_chat_completions_local(  # noqa: PLR0912, PLR0915
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     f"Model {req.model} does not support response_format structured outputs. "
-                    "Enable supports_structured_outputs: true for this model in configs/model_config.yaml."
+                    "Enable supports_structured_outputs: true for this model in models.yaml."
                 ),
             )
         base_messages = raw_messages

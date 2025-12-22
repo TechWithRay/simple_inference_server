@@ -11,7 +11,7 @@ This service can act as a **single OpenAI-compatible gateway**: your application
 
 ## Quick start
 
-1. Add proxy model entries to `configs/model_config.local.yaml` (recommended as an overlay; this file is ignored by `.gitignore`).
+1. Add proxy model entries to `models.local.yaml` (or `models.local.yml`) in the repo root (recommended as an overlay; this file is ignored by `.gitignore`).
 2. Put the proxy model **name** in `MODELS` (if `name` is not set, `hf_repo_id` is used as the model id).
 3. Configure the upstream URL / auth (via environment variables or per-model overrides), then start the service.
 
@@ -44,7 +44,7 @@ In other words, a typical proxy model configuration is:
 
 ## Configure proxy models (YAML)
 
-Recommended: add entries in `configs/model_config.local.yaml`.
+Recommended: add entries in `models.local.yaml` (or `models.local.yml`) in the repo root.
 
 ### OpenAI chat proxy
 

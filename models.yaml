@@ -95,3 +95,5 @@ models:
   - hf_repo_id: "openai/whisper-tiny.en"
     handler: "app.models.whisper.WhisperASR"
     supports_structured_outputs: false
+
+

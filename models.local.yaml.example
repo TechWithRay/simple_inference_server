@@ -1,0 +1,42 @@
+# Example local overlay for proxy models.
+#
+# Copy to `models.local.yaml` (or `models.local.yml`) and then include the `name`
+# values in your MODELS env var.
+#
+# Example:
+#   MODELS=openai-gpt-5.2,vllm-qwen3-30b-a3b-fp8
+#
+# Notes:
+# - `name` is the model id your client sends in requests (and what you put in MODELS).
+# - For proxy models, `hf_repo_id` is reused as the *upstream* model id (the value
+#   we forward as `model` to the upstream OpenAI-compatible service).
+#
+models:
+  # ---------------------------------------------------------------------------
+  # OpenAI chat proxy (GPT-5.2)
+  # ---------------------------------------------------------------------------
+  - name: "openai-gpt-5.2"
+    hf_repo_id: "gpt-5.2" # upstream model id
+    handler: "app.models.openai_proxy.OpenAIChatProxyModel"
+    # Recommended: keep secrets out of YAML; read from env.
+    upstream_api_key_env: "OPENAI_API_KEY"
+    # Optional overrides:
+    # upstream_base_url: "https://api.openai.com/v1"
+    # upstream_timeout_sec: 60
+    # upstream_headers:
+    #   OpenAI-Organization: "org_..."
+    skip_download: true
+
+  # ---------------------------------------------------------------------------
+  # Local vLLM chat proxy (no API key)
+  # ---------------------------------------------------------------------------
+  - name: "vllm-qwen3-30b-a3b-fp8"
+    hf_repo_id: "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8" # upstream model id
+    handler: "app.models.vllm_proxy.VLLMChatProxyModel"
+    # Point at your local vLLM OpenAI-compatible endpoint:
+    upstream_base_url: "http://127.0.0.1:8001/v1"
+    # Optional:
+    # upstream_timeout_sec: 60
+    # upstream_headers:
+    #   X-My-Header: "foo"
+    skip_download: true

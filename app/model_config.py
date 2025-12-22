@@ -8,15 +8,21 @@ import yaml
 YamlDict = dict[str, Any]
 
 
-def _local_overlay_path(base_path: Path) -> Path:
-    """Return the sibling `*.local.{yaml|yml}` overlay path for a given base config."""
+def _local_overlay_paths(base_path: Path) -> list[Path]:
+    """Return sibling `*.local.{yaml|yml}` overlay paths for a given base config.
+
+    We accept either `.yaml` or `.yml` for the overlay regardless of the base
+    config's extension, preferring the same suffix first.
+    """
 
     suffix = base_path.suffix
     if suffix in {".yaml", ".yml"}:
-        # model_config.yaml -> model_config.local.yaml
-        return base_path.with_name(f"{base_path.stem}.local{suffix}")
+        preferred = base_path.with_name(f"{base_path.stem}.local{suffix}")
+        alt_suffix = ".yml" if suffix == ".yaml" else ".yaml"
+        alternate = base_path.with_name(f"{base_path.stem}.local{alt_suffix}")
+        return [preferred, alternate]
     # Fallback: append ".local" to the full filename
-    return base_path.with_name(f"{base_path.name}.local")
+    return [base_path.with_name(f"{base_path.name}.local")]
 
 
 def _ensure_mapping(value: Any, *, label: str) -> YamlDict:
@@ -115,8 +121,8 @@ def load_model_config(config_path: str | Path) -> YamlDict:
     base_cfg = _ensure_mapping(base_raw, label=str(base_path))
     base_models = _extract_models(base_cfg, label=str(base_path))
 
-    overlay_path = _local_overlay_path(base_path)
-    if not overlay_path.exists():
+    overlay_path = next((p for p in _local_overlay_paths(base_path) if p.exists()), None)
+    if overlay_path is None:
         # Normalize the shape so callers can rely on list-of-mappings.
         base_cfg["models"] = base_models
         return base_cfg

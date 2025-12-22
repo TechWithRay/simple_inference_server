@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Model configuration
     # -------------------------------------------------------------------------
-    model_config_path: str = "configs/model_config.yaml"
+    model_config_path: str = Field(
+        default="models.yaml",
+        validation_alias=AliasChoices("MODEL_CONFIG_PATH", "MODEL_CONFIG"),
+    )
     models: str = ""  # Comma-separated list of model IDs to load
     model_device: str = "auto"  # cpu, cuda, cuda:<idx>, mps, auto
     auto_download_models: bool = True
