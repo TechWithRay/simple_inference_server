@@ -1,0 +1,39 @@
+# Base image for Jetson (JetPack 6 / L4T r36.2.0)
+# Includes PyTorch 2.2 and Python 3.10 pre-installed with CUDA support
+FROM dustynv/l4t-pytorch:r36.2.0
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+WORKDIR /app
+
+# Copy project files
+COPY pyproject.toml uv.lock* ./
+
+# Configure uv to use system python (where torch is installed)
+# We use --system to install into the system environment to leverage pre-installed PyTorch
+ENV UV_SYSTEM_PYTHON=1
+
+# Install dependencies
+# Note: We exclude torch/torchvision/torchaudio from the sync because they are pre-installed
+# in the base image and we don't want to overwrite them with incompatible PyPI wheels.
+# We use `uv pip install` instead of `uv sync` to have more control over system install.
+RUN uv pip install --system -r pyproject.toml --extra-index-url https://pypi.org/simple
+
+COPY . .
+
+# Models directory
+ENV HF_HOME=/app/models
+RUN mkdir -p /app/models
+
+# Default command
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -10,25 +10,35 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import sounddevice as sd
 
 from app.models.kokoro_tts import KokoroTTS
+import time
+
+text_input = """
+Merry Christmas! Happy New Year! Wish you get rich!
+"""
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Speak text using Kokoro-ONNX TTS")
-    parser.add_argument("text", help="Text to speak")
+    parser.add_argument("--text", default=text_input, help="Text to speak")
     parser.add_argument("--voice", default="af_sarah", help="Voice to use")
-    parser.add_argument("--speed", type=float, default=1.0, help="Speed of speech")
+    parser.add_argument("--speed", type=float, default=0.8, help="Speed of speech")
     parser.add_argument("--device", default="cpu", help="Device to run model on")
     args = parser.parse_args()
 
     print(f"Loading model on {args.device}...")
+    start_time = time.time()
     tts = KokoroTTS("kokoro-82m-onnx", device=args.device)
+    print(f"Model loaded in {time.time() - start_time:.2f} seconds")
+    model_completed_load_time = time.time()
 
     print(f"Generating speech for: '{args.text}'")
     samples, sample_rate = tts.generate_speech(
         args.text, voice=args.voice, speed=args.speed
     )
+    print(f"Speech generated in {time.time() - model_completed_load_time:.2f} seconds")
 
-    print("Playing audio...")
+    print("Playing audio... \n")
+    speech_start_time = time.time()
     try:
         sd.play(samples, sample_rate)
         sd.wait()
@@ -36,6 +46,11 @@ def main() -> None:
         print(f"Error playing audio: {e}")
         print("Make sure you have PortAudio installed")
         sys.exit(1)
+    speech_end_time = time.time()
+
+    print(
+        f"Audio playback finished in {speech_end_time - speech_start_time:.2f} seconds"
+    )
 
     print("Done.")
 

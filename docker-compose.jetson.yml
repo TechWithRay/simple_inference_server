@@ -1,0 +1,21 @@
+services:
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+    container_name: inference-server
+    runtime: nvidia  # Crucial for Jetson to access GPU
+    environment:
+      # Load BOTH models in one container
+      - MODELS=hexgrad/Kokoro-82M,Qwen/Qwen3-4B-Instruct-2507
+      - MODEL_DEVICE=cuda
+      - MAX_CONCURRENT=4
+      # Enable batching for embeddings if you add an embedding model later
+      - ENABLE_EMBEDDING_BATCHING=1
+      - HF_HOME=/app/models
+    volumes:
+      - ./models:/app/models
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    network_mode: host  # Often recommended for Jetson to avoid bridge overhead
