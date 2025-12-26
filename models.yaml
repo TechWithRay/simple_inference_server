@@ -1,4 +1,7 @@
 models:
+  - hf_repo_id: "kokoro-82m-onnx"
+    handler: "app.models.kokoro_tts.KokoroTTS"
+    supports_structured_outputs: false
   - hf_repo_id: "BAAI/bge-m3"
     handler: "app.models.hf_embedding.HFEmbeddingModel"
     supports_structured_outputs: false

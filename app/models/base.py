@@ -37,7 +37,9 @@ class EmbeddingModel(Protocol):
     # Capabilities advertised by the handler, e.g., ["text-embedding"].
     capabilities: list[str]
 
-    def embed(self, texts: list[str], cancel_event: threading.Event | None = None) -> np.ndarray: ...
+    def embed(
+        self, texts: list[str], cancel_event: threading.Event | None = None
+    ) -> np.ndarray: ...
 
     def count_tokens(self, texts: list[str]) -> int: ...
 
@@ -96,7 +98,9 @@ class ChatModel(Protocol):
         cancel_events: list[threading.Event] | None = None,
     ) -> list[ChatGeneration]: ...
 
-    def count_tokens(self, messages: Sequence[dict[str, Any]], *, add_generation_prompt: bool = True) -> int: ...
+    def count_tokens(
+        self, messages: Sequence[dict[str, Any]], *, add_generation_prompt: bool = True
+    ) -> int: ...
 
 
 @dataclass
@@ -170,3 +174,19 @@ class IntentModel(Protocol):
         self,
         text: str,
     ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class TTSModel(Protocol):
+    name: str
+    device: str | torch.device
+    capabilities: list[str]
+
+    def generate_speech(
+        self,
+        text: str,
+        voice: str,
+        speed: float = 1.0,
+        lang: str = "en-us",
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[np.ndarray, int]: ...

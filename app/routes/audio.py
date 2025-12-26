@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import io
 import logging
 import threading
 import time
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import soundfile as sf
 import torchaudio
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -24,6 +27,7 @@ from app.concurrency.audio_limiter import (
 )
 from app.config import settings
 from app.dependencies import get_model_registry
+from app.models.base import TTSModel
 from app.models.registry import ModelRegistry
 from app.monitoring.metrics import (
     observe_audio_latency,
@@ -57,6 +61,14 @@ class TranscriptionVerboseResponse(BaseModel):
     language: str | None = None
     duration: float | None = None
     segments: list[TranscriptionSegment] | None = None
+
+
+class SpeechRequest(BaseModel):
+    model: str
+    input: str
+    voice: str
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
+    speed: float = 1.0
 
 
 ALLOWED_AUDIO_RESPONSE_FORMATS = {"json", "text", "srt", "verbose_json", "vtt"}
@@ -448,4 +460,61 @@ async def create_translation(  # noqa: PLR0913
         response_format=response_format,
         temperature=temperature,
         timestamp_granularities=timestamp_granularities,
+    )
+
+
+@router.post("/v1/audio/speech")
+async def create_speech(
+    request: Request,
+    speech_request: SpeechRequest,
+    registry: Annotated[ModelRegistry, Depends(get_model_registry)],
+) -> Response:
+    model_name = speech_request.model
+    if model_name not in registry.models:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model '{model_name}' not found",
+        )
+
+    model = registry.models[model_name]
+    if not isinstance(model, TTSModel):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model '{model_name}' is not a TTS model",
+        )
+
+    # We'll use the audio executor to run the TTS generation
+    executor = get_audio_executor()
+    loop = asyncio.get_running_loop()
+
+    try:
+        # Run generation in thread pool
+        func = functools.partial(
+            model.generate_speech,
+            speech_request.input,
+            speech_request.voice,
+            speech_request.speed,
+            cancel_event=None,
+        )
+        samples, sample_rate = await run_in_executor_with_context_limited(
+            loop,
+            executor,
+            func,
+            model=model,
+        )
+    except Exception as e:
+        logger.exception("TTS generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
+
+    # Convert to bytes
+    buffer = io.BytesIO()
+    sf.write(buffer, samples, sample_rate, format="WAV")
+    buffer.seek(0)
+
+    return Response(
+        content=buffer.read(),
+        media_type="audio/wav",
     )
